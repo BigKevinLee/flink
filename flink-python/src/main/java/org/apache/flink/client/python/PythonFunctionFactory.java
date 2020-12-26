@@ -100,10 +100,11 @@ public interface PythonFunctionFactory {
 						setGatewayServer(gatewayServer);
 						List<String> commands = new ArrayList<>();
 						commands.add("-m");
-						commands.add("pyflink.python_callback_server");
+						commands.add("pyflink.pyflink_callback_server");
 						String tmpDir = System.getProperty("java.io.tmpdir") +
 						File.separator + "pyflink" + File.separator + UUID.randomUUID();
-						pythonProcess = launchPy4jPythonClient(gatewayServer, config, commands, null, tmpDir);
+						pythonProcess = launchPy4jPythonClient(
+							gatewayServer, config, commands, null, tmpDir, false);
 						entryPoint = (Map<String, Object>) gatewayServer.getGateway().getEntryPoint();
 						int i = 0;
 						while (!entryPoint.containsKey("PythonFunctionFactory")) {

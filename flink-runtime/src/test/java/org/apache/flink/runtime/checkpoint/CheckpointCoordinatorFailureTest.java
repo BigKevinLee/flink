@@ -21,6 +21,8 @@ package org.apache.flink.runtime.checkpoint;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.runtime.checkpoint.CheckpointCoordinatorTestingUtils.CheckpointCoordinatorBuilder;
+import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
+import org.apache.flink.runtime.checkpoint.channel.ResultSubpartitionInfo;
 import org.apache.flink.runtime.concurrent.ManuallyTriggeredScheduledExecutor;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
@@ -31,10 +33,12 @@ import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.OperatorStreamStateHandle;
 import org.apache.flink.runtime.state.ResultSubpartitionStateHandle;
+import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Test;
 
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
@@ -65,8 +69,6 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		final ExecutionAttemptID executionAttemptId = new ExecutionAttemptID();
 		final ExecutionVertex vertex = CheckpointCoordinatorTestingUtils.mockExecutionVertex(executionAttemptId);
 
-		final long triggerTimestamp = 1L;
-
 		// set up the coordinator and validate the initial state
 		CheckpointCoordinator coord =
 			new CheckpointCoordinatorBuilder()
@@ -76,7 +78,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 				.setTimer(manuallyTriggeredScheduledExecutor)
 				.build();
 
-		coord.triggerCheckpoint(triggerTimestamp, false);
+		coord.triggerCheckpoint(false);
 
 		manuallyTriggeredScheduledExecutor.triggerAll();
 
@@ -84,7 +86,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 
 		PendingCheckpoint pendingCheckpoint = coord.getPendingCheckpoints().values().iterator().next();
 
-		assertFalse(pendingCheckpoint.isDiscarded());
+		assertFalse(pendingCheckpoint.isDisposed());
 
 		final long checkpointId = coord.getPendingCheckpoints().keySet().iterator().next();
 
@@ -92,16 +94,17 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		KeyedStateHandle rawKeyedHandle = mock(KeyedStateHandle.class);
 		OperatorStateHandle managedOpHandle = mock(OperatorStreamStateHandle.class);
 		OperatorStateHandle rawOpHandle = mock(OperatorStreamStateHandle.class);
-		InputChannelStateHandle inputChannelStateHandle = mock(InputChannelStateHandle.class);
-		ResultSubpartitionStateHandle resultSubpartitionStateHandle = mock(ResultSubpartitionStateHandle.class);
+		InputChannelStateHandle inputChannelStateHandle = new InputChannelStateHandle(new InputChannelInfo(0, 1), mock(StreamStateHandle.class), Collections.singletonList(1L));
+		ResultSubpartitionStateHandle resultSubpartitionStateHandle = new ResultSubpartitionStateHandle(new ResultSubpartitionInfo(0, 1), mock(StreamStateHandle.class), Collections.singletonList(1L));
 
-		final OperatorSubtaskState operatorSubtaskState = spy(new OperatorSubtaskState(
-			managedOpHandle,
-			rawOpHandle,
-			managedKeyedHandle,
-			rawKeyedHandle,
-			StateObjectCollection.singleton(inputChannelStateHandle),
-			StateObjectCollection.singleton(resultSubpartitionStateHandle)));
+		final OperatorSubtaskState operatorSubtaskState = spy(OperatorSubtaskState.builder()
+			.setManagedOperatorState(managedOpHandle)
+			.setRawOperatorState(rawOpHandle)
+			.setManagedKeyedState(managedKeyedHandle)
+			.setRawKeyedState(rawKeyedHandle)
+			.setInputChannelState(StateObjectCollection.singleton(inputChannelStateHandle))
+			.setResultSubpartitionState(StateObjectCollection.singleton(resultSubpartitionStateHandle))
+			.build());
 
 		TaskStateSnapshot subtaskState = spy(new TaskStateSnapshot());
 		subtaskState.putSubtaskStateByOperatorID(new OperatorID(), operatorSubtaskState);
@@ -119,7 +122,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		}
 
 		// make sure that the pending checkpoint has been discarded after we could not complete it
-		assertTrue(pendingCheckpoint.isDiscarded());
+		assertTrue(pendingCheckpoint.isDisposed());
 
 		// make sure that the subtask state has been discarded after we could not complete it.
 		verify(operatorSubtaskState).discardState();
@@ -127,8 +130,8 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		verify(operatorSubtaskState.getRawOperatorState().iterator().next()).discardState();
 		verify(operatorSubtaskState.getManagedKeyedState().iterator().next()).discardState();
 		verify(operatorSubtaskState.getRawKeyedState().iterator().next()).discardState();
-		verify(operatorSubtaskState.getInputChannelState().iterator().next()).discardState();
-		verify(operatorSubtaskState.getResultSubpartitionState().iterator().next()).discardState();
+		verify(operatorSubtaskState.getInputChannelState().iterator().next().getDelegate()).discardState();
+		verify(operatorSubtaskState.getResultSubpartitionState().iterator().next().getDelegate()).discardState();
 	}
 
 	private static final class FailingCompletedCheckpointStore implements CompletedCheckpointStore {
@@ -139,7 +142,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		}
 
 		@Override
-		public void addCheckpoint(CompletedCheckpoint checkpoint) throws Exception {
+		public void addCheckpoint(CompletedCheckpoint checkpoint, CheckpointsCleaner checkpointsCleaner, Runnable postCleanup) throws Exception {
 			throw new Exception("The failing completed checkpoint store failed again... :-(");
 		}
 
@@ -149,7 +152,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 		}
 
 		@Override
-		public void shutdown(JobStatus jobStatus) throws Exception {
+		public void shutdown(JobStatus jobStatus, CheckpointsCleaner checkpointsCleaner, Runnable postCleanup) throws Exception {
 			throw new UnsupportedOperationException("Not implemented.");
 		}
 

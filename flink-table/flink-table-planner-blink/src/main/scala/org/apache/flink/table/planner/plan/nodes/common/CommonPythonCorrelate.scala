@@ -18,28 +18,26 @@
 
 package org.apache.flink.table.planner.plan.nodes.common
 
-import org.apache.calcite.rel.`type`.RelDataType
-import org.apache.calcite.rel.core.JoinRelType
-import org.apache.calcite.rex.{RexCall, RexInputRef, RexNode}
 import org.apache.flink.api.dag.Transformation
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator
 import org.apache.flink.streaming.api.transformations.OneInputTransformation
 import org.apache.flink.table.data.RowData
 import org.apache.flink.table.functions.python.PythonFunctionInfo
-import org.apache.flink.table.planner.calcite.FlinkTypeFactory
 import org.apache.flink.table.planner.plan.nodes.common.CommonPythonCorrelate.PYTHON_TABLE_FUNCTION_OPERATOR_NAME
-import org.apache.flink.table.planner.plan.nodes.logical.FlinkLogicalTableFunctionScan
-import org.apache.flink.table.runtime.typeutils.RowDataTypeInfo
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo
 import org.apache.flink.table.types.logical.RowType
+
+import org.apache.calcite.rel.core.JoinRelType
+import org.apache.calcite.rex.{RexCall, RexInputRef, RexNode}
 
 import scala.collection.mutable
 
 trait CommonPythonCorrelate extends CommonPythonBase {
   private def getPythonTableFunctionOperator(
       config: Configuration,
-      inputRowType: RowDataTypeInfo,
-      outputRowType: RowDataTypeInfo,
+      inputRowType: InternalTypeInfo[RowData],
+      outputRowType: InternalTypeInfo[RowData],
       pythonFunctionInfo: PythonFunctionInfo,
       udtfInputOffsets: Array[Int],
       joinType: JoinRelType): OneInputStreamOperator[RowData, RowData] = {
@@ -73,17 +71,16 @@ trait CommonPythonCorrelate extends CommonPythonBase {
 
   protected def createPythonOneInputTransformation(
       inputTransform: Transformation[RowData],
-      scan: FlinkLogicalTableFunctionScan,
+      pythonTableFuncRexCall: RexCall,
       name: String,
-      outputRowType: RelDataType,
+      outputRowType: RowType,
       config: Configuration,
       joinType: JoinRelType): OneInputTransformation[RowData, RowData] = {
-    val pythonTableFuncRexCall = scan.getCall.asInstanceOf[RexCall]
     val (pythonUdtfInputOffsets, pythonFunctionInfo) =
       extractPythonTableFunctionInfo(pythonTableFuncRexCall)
-    val pythonOperatorInputRowType = inputTransform.getOutputType.asInstanceOf[RowDataTypeInfo]
-    val pythonOperatorOutputRowType = RowDataTypeInfo.of(
-      FlinkTypeFactory.toLogicalType(outputRowType).asInstanceOf[RowType])
+    val pythonOperatorInputRowType = inputTransform.getOutputType
+      .asInstanceOf[InternalTypeInfo[RowData]]
+    val pythonOperatorOutputRowType = InternalTypeInfo.of(outputRowType)
     val pythonOperator = getPythonTableFunctionOperator(
       config,
       pythonOperatorInputRowType,

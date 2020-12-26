@@ -21,12 +21,12 @@ package org.apache.flink.table.runtime.stream.sql
 import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, TypeInformation}
 import org.apache.flink.api.java.typeutils.RowTypeInfo
 import org.apache.flink.api.scala._
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.watermark.Watermark
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{EnvironmentSettings, Types}
+import org.apache.flink.table.api._
+import org.apache.flink.table.api.bridge.scala._
+import org.apache.flink.table.api.internal.TableEnvironmentInternal
 import org.apache.flink.table.descriptors.{Rowtime, Schema}
 import org.apache.flink.table.expressions.utils.Func15
 import org.apache.flink.table.runtime.stream.sql.SqlITCase.TimestampAndWatermarkWithOffset
@@ -73,7 +73,6 @@ class SqlITCase extends StreamingWithStateTestBase {
       (16L, 16, "Hello"))     // (3, Hello)       - window (not merged)
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val stream = env
@@ -113,7 +112,6 @@ class SqlITCase extends StreamingWithStateTestBase {
   def testDistinctAggOnRowTimeTumbleWindow(): Unit = {
     val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     val tEnv = StreamTableEnvironment.create(env, settings)
     env.setParallelism(1)
 
@@ -146,7 +144,6 @@ class SqlITCase extends StreamingWithStateTestBase {
   def testRowTimeTumbleWindow(): Unit = {
     val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     val tEnv = StreamTableEnvironment.create(env, settings)
     env.setParallelism(1)
 
@@ -212,7 +209,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     
     val ds = env.fromCollection(data)
     
-    val t = ds.toTable(tEnv).as('a, 'b, 'c)
+    val t = ds.toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTableRow", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -232,7 +229,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT b, COUNT(a) FROM MyTable GROUP BY b"
 
-    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
@@ -257,7 +254,7 @@ class SqlITCase extends StreamingWithStateTestBase {
       "FROM MyTable " +
       "GROUP BY b"
 
-    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
@@ -286,7 +283,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     data.+=((4, 1L, "Hi World"))
     data.+=((4, 1L, "Test"))
 
-    val t = env.fromCollection(data).toTable(tEnv).as('a, 'b, 'c)
+    val t = env.fromCollection(data).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     // "1,1,3", "2,1,2", "3,1,1", "4,1,2"
@@ -314,7 +311,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT b, COLLECT(a) FROM MyTable GROUP BY b"
 
-    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.get3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
@@ -349,7 +346,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     )
 
     tEnv.registerTable("MyTable",
-      env.fromCollection(data).toTable(tEnv).as('a, 'b, 'c))
+      env.fromCollection(data).toTable(tEnv).as("a", "b", "c"))
 
     val result = tEnv.sqlQuery(sqlQuery).toRetractStream[Row]
     result.addSink(new StreamITCase.RetractingSink).setParallelism(1)
@@ -371,7 +368,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT * FROM MyTable"
 
-    val t = StreamTestData.getSmallNestedTupleDataStream(env).toTable(tEnv).as('a, 'b)
+    val t = StreamTestData.getSmallNestedTupleDataStream(env).toTable(tEnv).as("a", "b")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -391,7 +388,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT a * 2, b - 1 FROM MyTable"
 
-    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -411,7 +408,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT a * 2, b - 1 FROM MyTable"
 
-    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -431,7 +428,7 @@ class SqlITCase extends StreamingWithStateTestBase {
 
     val sqlQuery = "SELECT * FROM MyTable WHERE a = 3"
 
-    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -473,9 +470,9 @@ class SqlITCase extends StreamingWithStateTestBase {
       "UNION ALL " +
       "SELECT * FROM T2"
 
-    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T1", t1)
-    val t2 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t2 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T2", t2)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -500,9 +497,9 @@ class SqlITCase extends StreamingWithStateTestBase {
       "UNION ALL " +
       "SELECT * FROM T2 WHERE a = 2"
 
-    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T1", t1)
-    val t2 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t2 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T2", t2)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -526,7 +523,7 @@ class SqlITCase extends StreamingWithStateTestBase {
       "UNION ALL " +
       "SELECT c FROM T2 WHERE a = 2"
 
-    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T1", t1)
     val t2 = StreamTestData.get3TupleDataStream(env)
     tEnv.createTemporaryView("T2", t2, 'a, 'b, 'c)
@@ -638,7 +635,7 @@ class SqlITCase extends StreamingWithStateTestBase {
       (3, 2, (13, "41.6")),
       (4, 3, (14, "45.2136")),
       (5, 3, (18, "42.6")))
-    tEnv.registerTable("t1", env.fromCollection(data).toTable(tEnv).as('a, 'b, 'c))
+    tEnv.registerTable("t1", env.fromCollection(data).toTable(tEnv).as("a", "b", "c"))
 
     val t2 = tEnv.sqlQuery("SELECT b, COLLECT(c) as `set` FROM t1 GROUP BY b")
     tEnv.registerTable("t2", t2)
@@ -674,7 +671,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
     val tEnv = StreamTableEnvironment.create(env, settings)
 
-    val t1 = env.fromCollection(data).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = env.fromCollection(data).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("t1", t1)
 
     val t2 = tEnv.sqlQuery("SELECT a, COLLECT(b) as `set` FROM t1 GROUP BY a")
@@ -701,7 +698,6 @@ class SqlITCase extends StreamingWithStateTestBase {
     val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, settings)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setStateBackend(getStateBackend)
     env.setParallelism(1)
 
@@ -751,7 +747,6 @@ class SqlITCase extends StreamingWithStateTestBase {
   def testWriteReadTableSourceSink(): Unit = {
     val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     val tEnv = StreamTableEnvironment.create(env, settings)
     MemoryTableSourceSinkUtil.clear()
 
@@ -769,9 +764,9 @@ class SqlITCase extends StreamingWithStateTestBase {
       .toTable(tEnv, 'a, 'b, 'c, 'rowtime.rowtime)
     tEnv.registerTable("sourceTable", t)
 
-    tEnv.registerTableSource("targetTable",
+    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSourceInternal("targetTable",
       new InMemoryTableFactory(3).createStreamTableSource(properties))
-    tEnv.registerTableSink("targetTable",
+    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSinkInternal("targetTable",
       new InMemoryTableFactory(3).createStreamTableSink(properties))
 
     tEnv.sqlUpdate("INSERT INTO targetTable SELECT a, b, c, rowtime FROM sourceTable")
@@ -798,7 +793,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     val parameters = "c," + (0 until 300).map(_ => "a").mkString(",")
     val sqlQuery = s"SELECT func15($parameters) FROM T1"
 
-    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T1", t1)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -824,7 +819,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     val sqlQuery = s"SELECT T1.a, T2.x FROM T1 " +
       s"JOIN LATERAL TABLE(udtf($parameters)) as T2(x) ON TRUE"
 
-    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t1 = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("T1", t1)
 
     val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
@@ -844,7 +839,7 @@ class SqlITCase extends StreamingWithStateTestBase {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tEnv = StreamTableEnvironment.create(env, settings)
 
-    val t = StreamTestData.getSingletonDataStream(env).toTable(tEnv).as('a, 'b, 'c)
+    val t = StreamTestData.getSingletonDataStream(env).toTable(tEnv).as("a", "b", "c")
     tEnv.registerTable("MyTable", t)
 
     val sqlQuery = new StringBuilder

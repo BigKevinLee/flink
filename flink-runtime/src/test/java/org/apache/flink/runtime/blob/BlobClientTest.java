@@ -54,7 +54,9 @@ import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeFalse;
 
 /**
  * This class contains unit tests for the {@link BlobClient}.
@@ -230,6 +232,10 @@ public class BlobClientTest extends TestLogger {
 	@SuppressWarnings("WeakerAccess")
 	static void validateGetAndClose(final InputStream actualInputStream, final File expectedFile) throws IOException {
 		validateGetAndClose(actualInputStream, new FileInputStream(expectedFile));
+	}
+
+	protected boolean isSSLEnabled() {
+		return false;
 	}
 
 	@Test
@@ -419,6 +425,8 @@ public class BlobClientTest extends TestLogger {
 	private void testGetFailsDuringStreaming(@Nullable final JobID jobId, BlobKey.BlobType blobType)
 			throws IOException {
 
+		assumeFalse("This test can deadlock when using SSL. See FLINK-19369.", isSSLEnabled());
+
 		try (BlobClient client = new BlobClient(
 			new InetSocketAddress("localhost", getBlobServer().getPort()), getBlobClientConfig())) {
 
@@ -491,7 +499,6 @@ public class BlobClientTest extends TestLogger {
 		}
 	}
 
-
 	/**
 	 * Tests the socket operation timeout.
 	 */
@@ -516,6 +523,14 @@ public class BlobClientTest extends TestLogger {
 		} finally {
 			clientConfig.setInteger(BlobServerOptions.SO_TIMEOUT, oldSoTimeout);
 			getBlobServer().setBlockingMillis(0);
+		}
+	}
+
+	@Test
+	public void testUnresolvedInetSocketAddress() throws Exception {
+		try (BlobClient client = new BlobClient(
+			InetSocketAddress.createUnresolved("localhost", getBlobServer().getPort()), getBlobClientConfig())) {
+			assertTrue(client.isConnected());
 		}
 	}
 

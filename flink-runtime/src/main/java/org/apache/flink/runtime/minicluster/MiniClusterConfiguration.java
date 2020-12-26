@@ -27,7 +27,6 @@ import org.apache.flink.configuration.UnmodifiableConfiguration;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.taskexecutor.TaskExecutorResourceUtils;
 import org.apache.flink.util.Preconditions;
-import org.apache.flink.util.StringUtils;
 
 import javax.annotation.Nullable;
 
@@ -38,8 +37,6 @@ import static org.apache.flink.runtime.minicluster.RpcServiceSharing.SHARED;
  */
 public class MiniClusterConfiguration {
 
-	static final String SCHEDULER_TYPE_KEY = JobManagerOptions.SCHEDULER.key();
-
 	private final UnmodifiableConfiguration configuration;
 
 	private final int numTaskManagers;
@@ -49,6 +46,8 @@ public class MiniClusterConfiguration {
 	@Nullable
 	private final String commonBindAddress;
 
+	private final MiniCluster.HaServices haServices;
+
 	// ------------------------------------------------------------------------
 	//  Construction
 	// ------------------------------------------------------------------------
@@ -57,25 +56,17 @@ public class MiniClusterConfiguration {
 			Configuration configuration,
 			int numTaskManagers,
 			RpcServiceSharing rpcServiceSharing,
-			@Nullable String commonBindAddress) {
-
+			@Nullable String commonBindAddress,
+			MiniCluster.HaServices haServices) {
 		this.numTaskManagers = numTaskManagers;
 		this.configuration = generateConfiguration(Preconditions.checkNotNull(configuration));
 		this.rpcServiceSharing = Preconditions.checkNotNull(rpcServiceSharing);
 		this.commonBindAddress = commonBindAddress;
+		this.haServices = haServices;
 	}
 
 	private UnmodifiableConfiguration generateConfiguration(final Configuration configuration) {
-		String schedulerType = System.getProperty(SCHEDULER_TYPE_KEY);
-		if (StringUtils.isNullOrWhitespaceOnly(schedulerType)) {
-			schedulerType = JobManagerOptions.SCHEDULER.defaultValue();
-		}
-
 		final Configuration modifiedConfig = new Configuration(configuration);
-
-		if (!modifiedConfig.contains(JobManagerOptions.SCHEDULER)) {
-			modifiedConfig.setString(JobManagerOptions.SCHEDULER, schedulerType);
-		}
 
 		TaskExecutorResourceUtils.adjustForLocalExecution(modifiedConfig);
 
@@ -134,6 +125,10 @@ public class MiniClusterConfiguration {
 		return configuration;
 	}
 
+	public MiniCluster.HaServices getHaServices() {
+		return haServices;
+	}
+
 	@Override
 	public String toString() {
 		return "MiniClusterConfiguration {" +
@@ -162,6 +157,7 @@ public class MiniClusterConfiguration {
 		private RpcServiceSharing rpcServiceSharing = SHARED;
 		@Nullable
 		private String commonBindAddress = null;
+		private MiniCluster.HaServices haServices = MiniCluster.HaServices.CONFIGURED;
 
 		public Builder setConfiguration(Configuration configuration1) {
 			this.configuration = Preconditions.checkNotNull(configuration1);
@@ -188,6 +184,11 @@ public class MiniClusterConfiguration {
 			return this;
 		}
 
+		public Builder setHaServices(MiniCluster.HaServices haServices) {
+			this.haServices = haServices;
+			return this;
+		}
+
 		public MiniClusterConfiguration build() {
 			final Configuration modifiedConfiguration = new Configuration(configuration);
 			modifiedConfiguration.setInteger(TaskManagerOptions.NUM_TASK_SLOTS, numSlotsPerTaskManager);
@@ -199,7 +200,8 @@ public class MiniClusterConfiguration {
 				modifiedConfiguration,
 				numTaskManagers,
 				rpcServiceSharing,
-				commonBindAddress);
+				commonBindAddress,
+				haServices);
 		}
 	}
 }

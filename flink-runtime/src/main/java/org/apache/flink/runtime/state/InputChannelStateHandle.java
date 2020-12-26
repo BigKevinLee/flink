@@ -18,6 +18,7 @@
 package org.apache.flink.runtime.state;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 
 import java.util.List;
@@ -30,7 +31,16 @@ public class InputChannelStateHandle extends AbstractChannelStateHandle<InputCha
 
 	private static final long serialVersionUID = 1L;
 
+	public InputChannelStateHandle(int subtaskIndex, InputChannelInfo info, StreamStateHandle delegate, StateContentMetaInfo contentMetaInfo) {
+		this(subtaskIndex, info, delegate, contentMetaInfo.getOffsets(), contentMetaInfo.getSize());
+	}
+
+	@VisibleForTesting
 	public InputChannelStateHandle(InputChannelInfo info, StreamStateHandle delegate, List<Long> offset) {
-		super(delegate, offset, info);
+		this(0, info, delegate, offset, delegate.getStateSize());
+	}
+
+	public InputChannelStateHandle(int subtaskIndex, InputChannelInfo info, StreamStateHandle delegate, List<Long> offset, long size) {
+		super(delegate, offset, subtaskIndex, info, size);
 	}
 }

@@ -22,7 +22,6 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
-import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.runtime.blob.TransientBlobKey;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
@@ -47,11 +46,13 @@ import org.apache.flink.runtime.resourcemanager.exceptions.UnknownTaskExecutorEx
 import org.apache.flink.runtime.rest.messages.LogInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.ThreadDumpInfo;
+import org.apache.flink.runtime.slots.ResourceRequirements;
 import org.apache.flink.runtime.taskexecutor.FileType;
 import org.apache.flink.runtime.taskexecutor.SlotReport;
 import org.apache.flink.runtime.taskexecutor.TaskExecutorHeartbeatPayload;
 import org.apache.flink.runtime.taskexecutor.TaskExecutorRegistrationSuccess;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.function.QuadFunction;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -60,6 +61,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -82,7 +84,7 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 
 	private volatile Consumer<SlotRequest> requestSlotConsumer;
 
-	private volatile Consumer<Tuple4<JobMasterId, ResourceID, String, JobID>> registerJobManagerConsumer;
+	private volatile QuadFunction<JobMasterId, ResourceID, String, JobID, CompletableFuture<RegistrationResponse>> registerJobManagerFunction;
 
 	private volatile Consumer<Tuple2<JobID, Throwable>> disconnectJobManagerConsumer;
 
@@ -102,7 +104,11 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 
 	private volatile Function<ResourceID, CompletableFuture<Collection<LogInfo>>> requestTaskManagerLogListFunction;
 
+	private volatile Function<ResourceID, CompletableFuture<TaskManagerInfo>> requestTaskManagerInfoFunction;
+
 	private volatile Function<ResourceID, CompletableFuture<ThreadDumpInfo>> requestThreadDumpFunction;
+
+	private volatile BiFunction<JobMasterId, ResourceRequirements, CompletableFuture<Acknowledge>> declareRequiredResourcesFunction = (ignoredA, ignoredB) -> FutureUtils.completedExceptionally(new UnsupportedOperationException());
 
 	public TestingResourceManagerGateway() {
 		this(
@@ -142,8 +148,8 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 		this.requestSlotConsumer = slotRequestConsumer;
 	}
 
-	public void setRegisterJobManagerConsumer(Consumer<Tuple4<JobMasterId, ResourceID, String, JobID>> registerJobManagerConsumer) {
-		this.registerJobManagerConsumer = registerJobManagerConsumer;
+	public void setRegisterJobManagerFunction(QuadFunction<JobMasterId, ResourceID, String, JobID, CompletableFuture<RegistrationResponse>> registerJobManagerFunction) {
+		this.registerJobManagerFunction = registerJobManagerFunction;
 	}
 
 	public void setDisconnectJobManagerConsumer(Consumer<Tuple2<JobID, Throwable>> disconnectJobManagerConsumer) {
@@ -166,6 +172,10 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 		this.requestTaskManagerLogListFunction = requestTaskManagerLogListFunction;
 	}
 
+	public void setRequestTaskManagerInfoFunction(Function<ResourceID, CompletableFuture<TaskManagerInfo>> requestTaskManagerInfoFunction) {
+		this.requestTaskManagerInfoFunction = requestTaskManagerInfoFunction;
+	}
+
 	public void setDisconnectTaskExecutorConsumer(Consumer<Tuple2<ResourceID, Throwable>> disconnectTaskExecutorConsumer) {
 		this.disconnectTaskExecutorConsumer = disconnectTaskExecutorConsumer;
 	}
@@ -186,18 +196,25 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 		this.requestThreadDumpFunction = requestThreadDumpFunction;
 	}
 
+	public void setDeclareRequiredResourcesFunction(BiFunction<JobMasterId, ResourceRequirements, CompletableFuture<Acknowledge>> declareRequiredResourcesFunction) {
+		this.declareRequiredResourcesFunction = declareRequiredResourcesFunction;
+	}
+
 	@Override
 	public CompletableFuture<RegistrationResponse> registerJobManager(JobMasterId jobMasterId, ResourceID jobMasterResourceId, String jobMasterAddress, JobID jobId, Time timeout) {
-		final Consumer<Tuple4<JobMasterId, ResourceID, String, JobID>> currentConsumer = registerJobManagerConsumer;
+		final QuadFunction<JobMasterId, ResourceID, String, JobID, CompletableFuture<RegistrationResponse>> currentConsumer = registerJobManagerFunction;
 
 		if (currentConsumer != null) {
-			currentConsumer.accept(Tuple4.of(jobMasterId, jobMasterResourceId, jobMasterAddress, jobId));
+			return currentConsumer.apply(jobMasterId, jobMasterResourceId, jobMasterAddress, jobId);
 		}
 
-		return CompletableFuture.completedFuture(
-			new JobMasterRegistrationSuccess(
-				resourceManagerId,
-				ownResourceId));
+		return CompletableFuture.completedFuture(getJobMasterRegistrationSuccess());
+	}
+
+	public JobMasterRegistrationSuccess getJobMasterRegistrationSuccess() {
+		return new JobMasterRegistrationSuccess(
+			resourceManagerId,
+			ownResourceId);
 	}
 
 	@Override
@@ -215,6 +232,11 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 		} else {
 			return CompletableFuture.completedFuture(Acknowledge.get());
 		}
+	}
+
+	@Override
+	public CompletableFuture<Acknowledge> declareRequiredResources(JobMasterId jobMasterId, ResourceRequirements resourceRequirements, Time timeout) {
+		return declareRequiredResourcesFunction.apply(jobMasterId, resourceRequirements);
 	}
 
 	@Override
@@ -310,7 +332,13 @@ public class TestingResourceManagerGateway implements ResourceManagerGateway {
 
 	@Override
 	public CompletableFuture<TaskManagerInfo> requestTaskManagerInfo(ResourceID resourceId, Time timeout) {
-		return FutureUtils.completedExceptionally(new UnsupportedOperationException("Not yet implemented"));
+		final Function<ResourceID, CompletableFuture<TaskManagerInfo>> function = requestTaskManagerInfoFunction;
+
+		if (function != null) {
+			return function.apply(resourceId);
+		} else {
+			return FutureUtils.completedExceptionally(new IllegalStateException("No requestTaskManagerInfoFunction was set."));
+		}
 	}
 
 	@Override

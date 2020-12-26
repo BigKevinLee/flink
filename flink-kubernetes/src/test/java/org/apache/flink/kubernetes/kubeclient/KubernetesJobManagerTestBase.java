@@ -24,19 +24,13 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.configuration.RestOptions;
-import org.apache.flink.kubernetes.KubernetesTestBase;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.parameters.KubernetesJobManagerParameters;
-
-import org.junit.Before;
-
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Base test class for the JobManager side.
  */
-public class KubernetesJobManagerTestBase extends KubernetesTestBase {
+public class KubernetesJobManagerTestBase extends KubernetesPodTestBase {
 
 	protected static final double JOB_MANAGER_CPU = 2.0;
 	protected static final int JOB_MANAGER_MEMORY = 768;
@@ -46,34 +40,11 @@ public class KubernetesJobManagerTestBase extends KubernetesTestBase {
 	protected static final int RPC_PORT = 7123;
 	protected static final int BLOB_SERVER_PORT = 8346;
 
-	protected final Map<String, String> customizedEnvs = new HashMap<String, String>() {
-		{
-			put("key1", "value1");
-			put("key2", "value2");
-		}
-	};
-
-	protected final Map<String, String> userLabels = new HashMap<String, String>() {
-		{
-			put("label1", "value1");
-			put("label2", "value2");
-		}
-	};
-
-	protected final Map<String, String> nodeSelector = new HashMap<String, String>() {
-		{
-			put("env", "production");
-			put("disk", "ssd");
-		}
-	};
-
 	protected KubernetesJobManagerParameters kubernetesJobManagerParameters;
 
-	protected FlinkPod baseFlinkPod;
-
-	@Before
-	public void setup() throws Exception {
-		super.setup();
+	@Override
+	protected void setupFlinkConfig() {
+		super.setupFlinkConfig();
 
 		this.flinkConfig.set(RestOptions.PORT, REST_PORT);
 		this.flinkConfig.set(RestOptions.BIND_PORT, REST_BIND_PORT);
@@ -85,7 +56,10 @@ public class KubernetesJobManagerTestBase extends KubernetesTestBase {
 		this.flinkConfig.set(KubernetesConfigOptions.JOB_MANAGER_LABELS, userLabels);
 		this.flinkConfig.set(KubernetesConfigOptions.JOB_MANAGER_NODE_SELECTOR, nodeSelector);
 		this.flinkConfig.set(JobManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(JOB_MANAGER_MEMORY));
+	}
 
+	@Override
+	protected void onSetup() throws Exception {
 		final ClusterSpecification clusterSpecification = new ClusterSpecification.ClusterSpecificationBuilder()
 			.setMasterMemoryMB(JOB_MANAGER_MEMORY)
 			.setTaskManagerMemoryMB(1024)
@@ -93,7 +67,5 @@ public class KubernetesJobManagerTestBase extends KubernetesTestBase {
 			.createClusterSpecification();
 
 		this.kubernetesJobManagerParameters = new KubernetesJobManagerParameters(flinkConfig, clusterSpecification);
-
-		this.baseFlinkPod = new FlinkPod.Builder().build();
 	}
 }

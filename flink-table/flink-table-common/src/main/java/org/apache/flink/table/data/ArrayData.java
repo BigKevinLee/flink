@@ -20,11 +20,16 @@ package org.apache.flink.table.data;
 
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.table.types.logical.ArrayType;
-import org.apache.flink.table.types.logical.DecimalType;
-import org.apache.flink.table.types.logical.LocalZonedTimestampType;
+import org.apache.flink.table.types.logical.DistinctType;
 import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.RowType;
-import org.apache.flink.table.types.logical.TimestampType;
+
+import javax.annotation.Nullable;
+
+import java.io.Serializable;
+
+import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getFieldCount;
+import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getPrecision;
+import static org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getScale;
 
 /**
  * Base interface of an internal data structure representing data of {@link ArrayType}.
@@ -157,62 +162,101 @@ public interface ArrayData {
 	// ------------------------------------------------------------------------------------------
 
 	/**
-	 * Returns the element object in the internal array data structure at the given position.
+	 * Creates an accessor for getting elements in an internal array data structure at the
+	 * given position.
 	 *
-	 * @param array the internal array data
-	 * @param pos position of the element to return
 	 * @param elementType the element type of the array
-	 * @return the element object at the specified position in this array data
 	 */
-	static Object get(ArrayData array, int pos, LogicalType elementType) {
-		if (array.isNullAt(pos)) {
-			return null;
-		}
+	static ElementGetter createElementGetter(LogicalType elementType) {
+		final ElementGetter elementGetter;
+		// ordered by type root definition
 		switch (elementType.getTypeRoot()) {
+			case CHAR:
+			case VARCHAR:
+				elementGetter = ArrayData::getString;
+				break;
 			case BOOLEAN:
-				return array.getBoolean(pos);
+				elementGetter = ArrayData::getBoolean;
+				break;
+			case BINARY:
+			case VARBINARY:
+				elementGetter = ArrayData::getBinary;
+				break;
+			case DECIMAL:
+				final int decimalPrecision = getPrecision(elementType);
+				final int decimalScale = getScale(elementType);
+				elementGetter = (array, pos) -> array.getDecimal(pos, decimalPrecision, decimalScale);
+				break;
 			case TINYINT:
-				return array.getByte(pos);
+				elementGetter = ArrayData::getByte;
+				break;
 			case SMALLINT:
-				return array.getShort(pos);
+				elementGetter = ArrayData::getShort;
+				break;
 			case INTEGER:
 			case DATE:
 			case TIME_WITHOUT_TIME_ZONE:
 			case INTERVAL_YEAR_MONTH:
-				return array.getInt(pos);
+				elementGetter = ArrayData::getInt;
+				break;
 			case BIGINT:
 			case INTERVAL_DAY_TIME:
-				return array.getLong(pos);
-			case TIMESTAMP_WITHOUT_TIME_ZONE:
-				TimestampType timestampType = (TimestampType) elementType;
-				return array.getTimestamp(pos, timestampType.getPrecision());
-			case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-				LocalZonedTimestampType lzTs = (LocalZonedTimestampType) elementType;
-				return array.getTimestamp(pos, lzTs.getPrecision());
+				elementGetter = ArrayData::getLong;
+				break;
 			case FLOAT:
-				return array.getFloat(pos);
+				elementGetter = ArrayData::getFloat;
+				break;
 			case DOUBLE:
-				return array.getDouble(pos);
-			case CHAR:
-			case VARCHAR:
-				return array.getString(pos);
-			case DECIMAL:
-				DecimalType decimalType = (DecimalType) elementType;
-				return array.getDecimal(pos, decimalType.getPrecision(), decimalType.getScale());
+				elementGetter = ArrayData::getDouble;
+				break;
+			case TIMESTAMP_WITHOUT_TIME_ZONE:
+			case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+				final int timestampPrecision = getPrecision(elementType);
+				elementGetter = (array, pos) -> array.getTimestamp(pos, timestampPrecision);
+				break;
+			case TIMESTAMP_WITH_TIME_ZONE:
+				throw new UnsupportedOperationException();
 			case ARRAY:
-				return array.getArray(pos);
-			case MAP:
+				elementGetter = ArrayData::getArray;
+				break;
 			case MULTISET:
-				return array.getMap(pos);
+			case MAP:
+				elementGetter = ArrayData::getMap;
+				break;
 			case ROW:
-				return array.getRow(pos, ((RowType) elementType).getFieldCount());
-			case BINARY:
-			case VARBINARY:
-				return array.getBinary(pos);
+			case STRUCTURED_TYPE:
+				final int rowFieldCount = getFieldCount(elementType);
+				elementGetter = (array, pos) -> array.getRow(pos, rowFieldCount);
+				break;
+			case DISTINCT_TYPE:
+				elementGetter = createElementGetter(((DistinctType) elementType).getSourceType());
+				break;
 			case RAW:
-				return array.getRawValue(pos);
+				elementGetter = ArrayData::getRawValue;
+				break;
+			case NULL:
+			case SYMBOL:
+			case UNRESOLVED:
 			default:
-				throw new UnsupportedOperationException("Unsupported type: " + elementType);
+				throw new IllegalArgumentException();
 		}
+		if (!elementType.isNullable()) {
+			return elementGetter;
+		}
+		return (array, pos) -> {
+			if (array.isNullAt(pos)) {
+				return null;
+			}
+			return elementGetter.getElementOrNull(array, pos);
+		};
+	}
+
+	/**
+	 * Accessor for getting the elements of an array during runtime.
+	 *
+	 * @see #createElementGetter(LogicalType)
+	 */
+	interface ElementGetter extends Serializable {
+		@Nullable Object getElementOrNull(ArrayData array, int pos);
 	}
 }

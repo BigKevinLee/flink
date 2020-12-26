@@ -18,19 +18,22 @@
 
 package org.apache.flink.runtime.io.network.partition.consumer;
 
-import org.apache.flink.core.memory.MemorySegmentProvider;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.ConnectionManager;
-import org.apache.flink.runtime.io.network.LocalConnectionManager;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
 import org.apache.flink.runtime.io.network.TaskEventPublisher;
+import org.apache.flink.runtime.io.network.TestingConnectionManager;
 import org.apache.flink.runtime.io.network.metrics.InputChannelMetrics;
 import org.apache.flink.runtime.io.network.partition.InputChannelTestUtils;
+import org.apache.flink.runtime.io.network.partition.NoOpResultSubpartitionView;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionManager;
 
 import java.net.InetSocketAddress;
+
+import static org.apache.flink.runtime.io.network.partition.consumer.SingleInputGateTest.TestingResultPartitionManager;
 
 /**
  * Builder for various {@link InputChannel} types.
@@ -42,13 +45,14 @@ public class InputChannelBuilder {
 	private int channelIndex = 0;
 	private ResultPartitionID partitionId = new ResultPartitionID();
 	private ConnectionID connectionID = STUB_CONNECTION_ID;
-	private ResultPartitionManager partitionManager = new ResultPartitionManager();
+	private ResultPartitionManager partitionManager = new TestingResultPartitionManager(new NoOpResultSubpartitionView());
 	private TaskEventPublisher taskEventPublisher = new TaskEventDispatcher();
-	private ConnectionManager connectionManager = new LocalConnectionManager();
+	private ChannelStateWriter stateWriter = ChannelStateWriter.NO_OP;
+	private ConnectionManager connectionManager = new TestingConnectionManager();
 	private int initialBackoff = 0;
 	private int maxBackoff = 0;
+	private int networkBuffersPerChannel = 2;
 	private InputChannelMetrics metrics = InputChannelTestUtils.newUnregisteredInputChannelMetrics();
-	private MemorySegmentProvider memorySegmentProvider = InputChannelTestUtils.StubMemorySegmentProvider.getInstance();
 
 	public static InputChannelBuilder newBuilder() {
 		return new InputChannelBuilder();
@@ -89,13 +93,18 @@ public class InputChannelBuilder {
 		return this;
 	}
 
+	public InputChannelBuilder setNetworkBuffersPerChannel(int networkBuffersPerChannel) {
+		this.networkBuffersPerChannel = networkBuffersPerChannel;
+		return this;
+	}
+
 	public InputChannelBuilder setMetrics(InputChannelMetrics metrics) {
 		this.metrics = metrics;
 		return this;
 	}
 
-	public InputChannelBuilder setMemorySegmentProvider(MemorySegmentProvider memorySegmentProvider) {
-		this.memorySegmentProvider = memorySegmentProvider;
+	public InputChannelBuilder setStateWriter(ChannelStateWriter stateWriter) {
+		this.stateWriter = stateWriter;
 		return this;
 	}
 
@@ -104,12 +113,12 @@ public class InputChannelBuilder {
 		this.connectionManager = network.getConnectionManager();
 		this.initialBackoff = network.getConfiguration().partitionRequestInitialBackoff();
 		this.maxBackoff = network.getConfiguration().partitionRequestMaxBackoff();
-		this.memorySegmentProvider = network.getNetworkBufferPool();
+		this.networkBuffersPerChannel = network.getConfiguration().networkBuffersPerChannel();
 		return this;
 	}
 
 	UnknownInputChannel buildUnknownChannel(SingleInputGate inputGate) {
-		return new UnknownInputChannel(
+		UnknownInputChannel channel = new UnknownInputChannel(
 			inputGate,
 			channelIndex,
 			partitionId,
@@ -118,8 +127,10 @@ public class InputChannelBuilder {
 			connectionManager,
 			initialBackoff,
 			maxBackoff,
-			metrics,
-			memorySegmentProvider);
+			networkBuffersPerChannel,
+			metrics);
+		channel.setChannelStateWriter(stateWriter);
+		return channel;
 	}
 
 	public LocalInputChannel buildLocalChannel(SingleInputGate inputGate) {
@@ -131,7 +142,9 @@ public class InputChannelBuilder {
 			taskEventPublisher,
 			initialBackoff,
 			maxBackoff,
-			metrics);
+			metrics.getNumBytesInLocalCounter(),
+			metrics.getNumBuffersInLocalCounter(),
+			stateWriter);
 	}
 
 	public RemoteInputChannel buildRemoteChannel(SingleInputGate inputGate) {
@@ -143,7 +156,39 @@ public class InputChannelBuilder {
 			connectionManager,
 			initialBackoff,
 			maxBackoff,
-			metrics,
-			memorySegmentProvider);
+			networkBuffersPerChannel,
+			metrics.getNumBytesInRemoteCounter(),
+			metrics.getNumBuffersInRemoteCounter(),
+			stateWriter);
+	}
+
+	public LocalRecoveredInputChannel buildLocalRecoveredChannel(SingleInputGate inputGate) {
+		LocalRecoveredInputChannel channel = new LocalRecoveredInputChannel(
+			inputGate,
+			channelIndex,
+			partitionId,
+			partitionManager,
+			taskEventPublisher,
+			initialBackoff,
+			maxBackoff,
+			networkBuffersPerChannel,
+			metrics);
+		channel.setChannelStateWriter(stateWriter);
+		return channel;
+	}
+
+	public RemoteRecoveredInputChannel buildRemoteRecoveredChannel(SingleInputGate inputGate) {
+		RemoteRecoveredInputChannel channel = new RemoteRecoveredInputChannel(
+			inputGate,
+			channelIndex,
+			partitionId,
+			connectionID,
+			connectionManager,
+			initialBackoff,
+			maxBackoff,
+			networkBuffersPerChannel,
+			metrics);
+		channel.setChannelStateWriter(stateWriter);
+		return channel;
 	}
 }

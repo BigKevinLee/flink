@@ -18,6 +18,7 @@
 package org.apache.flink.runtime.state;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.checkpoint.channel.ResultSubpartitionInfo;
 
 import java.util.List;
@@ -30,7 +31,16 @@ public class ResultSubpartitionStateHandle extends AbstractChannelStateHandle<Re
 
 	private static final long serialVersionUID = 1L;
 
+	public ResultSubpartitionStateHandle(int subtaskIndex, ResultSubpartitionInfo info, StreamStateHandle delegate, StateContentMetaInfo contentMetaInfo) {
+		this(subtaskIndex, info, delegate, contentMetaInfo.getOffsets(), contentMetaInfo.getSize());
+	}
+
+	@VisibleForTesting
 	public ResultSubpartitionStateHandle(ResultSubpartitionInfo info, StreamStateHandle delegate, List<Long> offset) {
-		super(delegate, offset, info);
+		this(0, info, delegate, offset, delegate.getStateSize());
+	}
+
+	public ResultSubpartitionStateHandle(int subtaskIndex, ResultSubpartitionInfo info, StreamStateHandle delegate, List<Long> offset, long size) {
+		super(delegate, offset, subtaskIndex, info, size);
 	}
 }

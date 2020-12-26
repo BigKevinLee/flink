@@ -18,11 +18,18 @@
 
 package org.apache.flink.table.filesystem;
 
+import org.apache.flink.api.common.io.FileInputFormat;
+import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.io.OutputFormat;
 import org.apache.flink.api.common.serialization.BulkWriter;
+import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.Encoder;
+import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.connector.file.src.FileSourceSplit;
+import org.apache.flink.connector.file.src.reader.BulkFormat;
 import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
@@ -30,134 +37,298 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.functions.sink.filesystem.BucketAssigner;
+import org.apache.flink.streaming.api.functions.sink.filesystem.OutputFileConfig;
 import org.apache.flink.streaming.api.functions.sink.filesystem.PartFileInfo;
 import org.apache.flink.streaming.api.functions.sink.filesystem.RollingPolicy;
 import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink;
+import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink.BucketsBuilder;
 import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.SimpleVersionedStringSerializer;
 import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.CheckpointRollingPolicy;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.connector.format.DecodingFormat;
+import org.apache.flink.table.connector.format.EncodingFormat;
+import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
+import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
+import org.apache.flink.table.connector.sink.abilities.SupportsPartitioning;
+import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.expressions.ResolvedExpression;
+import org.apache.flink.table.factories.DynamicTableFactory;
+import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.factories.FileSystemFormatFactory;
-import org.apache.flink.table.sinks.AppendStreamTableSink;
-import org.apache.flink.table.sinks.OverwritableTableSink;
-import org.apache.flink.table.sinks.PartitionableTableSink;
-import org.apache.flink.table.sinks.TableSink;
+import org.apache.flink.table.filesystem.stream.PartitionCommitInfo;
+import org.apache.flink.table.filesystem.stream.StreamingSink;
+import org.apache.flink.table.filesystem.stream.compact.CompactBulkReader;
+import org.apache.flink.table.filesystem.stream.compact.CompactReader;
+import org.apache.flink.table.filesystem.stream.compact.FileInputFormatCompactReader;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.utils.PartitionPathUtils;
 import org.apache.flink.util.Preconditions;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
-import static org.apache.flink.table.filesystem.FileSystemTableFactory.createFormatFactory;
+import static org.apache.flink.table.filesystem.FileSystemOptions.SINK_ROLLING_POLICY_CHECK_INTERVAL;
+import static org.apache.flink.table.filesystem.FileSystemOptions.SINK_ROLLING_POLICY_FILE_SIZE;
+import static org.apache.flink.table.filesystem.FileSystemOptions.SINK_ROLLING_POLICY_ROLLOVER_INTERVAL;
+import static org.apache.flink.table.filesystem.stream.compact.CompactOperator.convertToUncompacted;
 
 /**
- * File system {@link TableSink}.
+ * File system {@link DynamicTableSink}.
  */
-public class FileSystemTableSink implements
-		AppendStreamTableSink<RowData>,
-		PartitionableTableSink,
-		OverwritableTableSink {
+public class FileSystemTableSink extends AbstractFileSystemTable implements
+		DynamicTableSink,
+		SupportsPartitioning,
+		SupportsOverwrite {
 
-	private final boolean isBounded;
-	private final TableSchema schema;
-	private final List<String> partitionKeys;
-	private final Path path;
-	private final String defaultPartName;
-	private final long rollingFileSize;
-	private final long rollingTimeInterval;
-	private final Map<String, String> formatProperties;
+	// For compaction reading
+	@Nullable private final DecodingFormat<BulkFormat<RowData, FileSourceSplit>> bulkReaderFormat;
+	@Nullable private final DecodingFormat<DeserializationSchema<RowData>> deserializationFormat;
+	@Nullable private final FileSystemFormatFactory formatFactory;
+
+	// For Writing
+	@Nullable private final EncodingFormat<BulkWriter.Factory<RowData>> bulkWriterFormat;
+	@Nullable private final EncodingFormat<SerializationSchema<RowData>> serializationFormat;
 
 	private boolean overwrite = false;
 	private boolean dynamicGrouping = false;
 	private LinkedHashMap<String, String> staticPartitions = new LinkedHashMap<>();
 
-	/**
-	 * Construct a file system table sink.
-	 *
-	 * @param isBounded whether the input of sink is bounded.
-	 * @param schema schema of the table.
-	 * @param path directory path of the file system table.
-	 * @param partitionKeys partition keys of the table.
-	 * @param defaultPartName The default partition name in case the dynamic partition column value
-	 *                        is null/empty string.
-	 * @param rollingFileSize the maximum part file size before rolling.
-	 * @param rollingTimeInterval the maximum time duration a part file can stay open before rolling.
-	 * @param formatProperties format properties.
-	 */
-	public FileSystemTableSink(
-			boolean isBounded,
-			TableSchema schema,
-			Path path,
-			List<String> partitionKeys,
-			String defaultPartName,
-			long rollingFileSize,
-			long rollingTimeInterval,
-			Map<String, String> formatProperties) {
-		this.isBounded = isBounded;
-		this.schema = schema;
-		this.path = path;
-		this.defaultPartName = defaultPartName;
-		this.rollingFileSize = rollingFileSize;
-		this.rollingTimeInterval = rollingTimeInterval;
-		this.formatProperties = formatProperties;
-		this.partitionKeys = partitionKeys;
+	FileSystemTableSink(
+			DynamicTableFactory.Context context,
+			@Nullable DecodingFormat<BulkFormat<RowData, FileSourceSplit>> bulkReaderFormat,
+			@Nullable DecodingFormat<DeserializationSchema<RowData>> deserializationFormat,
+			@Nullable FileSystemFormatFactory formatFactory,
+			@Nullable EncodingFormat<BulkWriter.Factory<RowData>> bulkWriterFormat,
+			@Nullable EncodingFormat<SerializationSchema<RowData>> serializationFormat) {
+		super(context);
+		this.bulkReaderFormat = bulkReaderFormat;
+		this.deserializationFormat = deserializationFormat;
+		this.formatFactory = formatFactory;
+		if (Stream.of(bulkWriterFormat, serializationFormat, formatFactory).allMatch(Objects::isNull)) {
+			Configuration options = Configuration.fromMap(context.getCatalogTable().getOptions());
+			String identifier = options.get(FactoryUtil.FORMAT);
+			throw new ValidationException(String.format(
+				"Could not find any format factory for identifier '%s' in the classpath.",
+				identifier));
+		}
+		this.bulkWriterFormat = bulkWriterFormat;
+		this.serializationFormat = serializationFormat;
 	}
 
 	@Override
-	public final DataStreamSink<RowData> consumeDataStream(DataStream<RowData> dataStream) {
-		RowDataPartitionComputer computer = new RowDataPartitionComputer(
-				defaultPartName,
-				schema.getFieldNames(),
-				schema.getFieldDataTypes(),
-				partitionKeys.toArray(new String[0]));
+	public SinkRuntimeProvider getSinkRuntimeProvider(Context sinkContext) {
+		return (DataStreamSinkProvider) dataStream -> consume(dataStream, sinkContext);
+	}
 
-		if (isBounded) {
-			FileSystemOutputFormat.Builder<RowData> builder = new FileSystemOutputFormat.Builder<>();
-			builder.setPartitionComputer(computer);
-			builder.setDynamicGrouped(dynamicGrouping);
-			builder.setPartitionColumns(partitionKeys.toArray(new String[0]));
-			builder.setFormatFactory(createOutputFormatFactory());
-			builder.setMetaStoreFactory(createTableMetaStoreFactory(path));
-			builder.setOverwrite(overwrite);
-			builder.setStaticPartitions(staticPartitions);
-			builder.setTempPath(toStagingPath());
-			return dataStream.writeUsingOutputFormat(builder.build())
-					.setParallelism(dataStream.getParallelism());
+	private DataStreamSink<?> consume(DataStream<RowData> dataStream, Context sinkContext) {
+		if (sinkContext.isBounded()) {
+			return createBatchSink(dataStream, sinkContext);
 		} else {
 			if (overwrite) {
 				throw new IllegalStateException("Streaming mode not support overwrite.");
 			}
 
-			Object writer = createWriter();
+			return createStreamingSink(dataStream, sinkContext);
+		}
+	}
 
-			TableBucketAssigner assigner = new TableBucketAssigner(computer);
-			TableRollingPolicy rollingPolicy = new TableRollingPolicy(
-					!(writer instanceof Encoder),
-					rollingFileSize,
-					rollingTimeInterval);
+	private RowDataPartitionComputer partitionComputer() {
+		return new RowDataPartitionComputer(
+				defaultPartName,
+				schema.getFieldNames(),
+				schema.getFieldDataTypes(),
+				partitionKeys.toArray(new String[0]));
+	}
 
-			StreamingFileSink<RowData> sink;
-			if (writer instanceof Encoder) {
+	private DataStreamSink<RowData> createBatchSink(
+			DataStream<RowData> inputStream, Context sinkContext) {
+		FileSystemOutputFormat.Builder<RowData> builder = new FileSystemOutputFormat.Builder<>();
+		builder.setPartitionComputer(partitionComputer());
+		builder.setDynamicGrouped(dynamicGrouping);
+		builder.setPartitionColumns(partitionKeys.toArray(new String[0]));
+		builder.setFormatFactory(createOutputFormatFactory(sinkContext));
+		builder.setMetaStoreFactory(new EmptyMetaStoreFactory(path));
+		builder.setOverwrite(overwrite);
+		builder.setStaticPartitions(staticPartitions);
+		builder.setTempPath(toStagingPath());
+		builder.setOutputFileConfig(OutputFileConfig.builder()
+				.withPartPrefix("part-" + UUID.randomUUID().toString())
+				.build());
+		return inputStream.writeUsingOutputFormat(builder.build())
+				.setParallelism(inputStream.getParallelism());
+	}
+
+	private DataStreamSink<?> createStreamingSink(
+			DataStream<RowData> dataStream, Context sinkContext) {
+		FileSystemFactory fsFactory = FileSystem::get;
+		RowDataPartitionComputer computer = partitionComputer();
+
+		boolean autoCompaction = tableOptions.getBoolean(FileSystemOptions.AUTO_COMPACTION);
+		Object writer = createWriter(sinkContext);
+		boolean isEncoder = writer instanceof Encoder;
+		TableBucketAssigner assigner = new TableBucketAssigner(computer);
+		TableRollingPolicy rollingPolicy = new TableRollingPolicy(
+				!isEncoder || autoCompaction,
+				tableOptions.get(SINK_ROLLING_POLICY_FILE_SIZE).getBytes(),
+				tableOptions.get(SINK_ROLLING_POLICY_ROLLOVER_INTERVAL).toMillis());
+
+		String randomPrefix = "part-" + UUID.randomUUID().toString();
+		OutputFileConfig.OutputFileConfigBuilder fileNamingBuilder = OutputFileConfig.builder();
+		fileNamingBuilder = autoCompaction ?
+				fileNamingBuilder.withPartPrefix(convertToUncompacted(randomPrefix)) :
+				fileNamingBuilder.withPartPrefix(randomPrefix);
+		OutputFileConfig fileNamingConfig = fileNamingBuilder.build();
+
+		BucketsBuilder<RowData, String, ? extends BucketsBuilder<RowData, ?, ?>> bucketsBuilder;
+		if (isEncoder) {
+			//noinspection unchecked
+			bucketsBuilder = StreamingFileSink.forRowFormat(
+					path, new ProjectionEncoder((Encoder<RowData>) writer, computer))
+					.withBucketAssigner(assigner)
+					.withOutputFileConfig(fileNamingConfig)
+					.withRollingPolicy(rollingPolicy);
+		} else {
+			//noinspection unchecked
+			bucketsBuilder = StreamingFileSink.forBulkFormat(
+					path, new ProjectionBulkFactory((BulkWriter.Factory<RowData>) writer, computer))
+					.withBucketAssigner(assigner)
+					.withOutputFileConfig(fileNamingConfig)
+					.withRollingPolicy(rollingPolicy);
+		}
+
+		long bucketCheckInterval = tableOptions.get(SINK_ROLLING_POLICY_CHECK_INTERVAL).toMillis();
+
+		DataStream<PartitionCommitInfo> writerStream;
+		if (autoCompaction) {
+			long compactionSize = tableOptions
+					.getOptional(FileSystemOptions.COMPACTION_FILE_SIZE)
+					.orElse(tableOptions.get(SINK_ROLLING_POLICY_FILE_SIZE))
+					.getBytes();
+
+			CompactReader.Factory<RowData> reader = createCompactReaderFactory(sinkContext).orElseThrow(
+					() -> new TableException("Please implement available reader for compaction:" +
+							" BulkFormat, FileInputFormat."));
+
+			writerStream = StreamingSink.compactionWriter(
+					dataStream,
+					bucketCheckInterval,
+					bucketsBuilder,
+					fsFactory,
+					path,
+					reader,
+					compactionSize);
+		} else {
+			writerStream = StreamingSink.writer(
+					dataStream, bucketCheckInterval, bucketsBuilder);
+		}
+
+		return StreamingSink.sink(
+				writerStream,
+				path,
+				tableIdentifier,
+				partitionKeys,
+				new EmptyMetaStoreFactory(path),
+				fsFactory,
+				tableOptions);
+	}
+
+	private Optional<CompactReader.Factory<RowData>> createCompactReaderFactory(Context context) {
+		DataType producedDataType = schema.toRowDataType();
+		if (bulkReaderFormat != null) {
+			BulkFormat<RowData, FileSourceSplit> format = bulkReaderFormat.createRuntimeDecoder(
+					createSourceContext(context), producedDataType);
+			return Optional.of(CompactBulkReader.factory(format));
+		} else if (formatFactory != null) {
+			InputFormat<RowData, ?> format = formatFactory.createReader(createReaderContext());
+			if (format instanceof FileInputFormat) {
 				//noinspection unchecked
-				sink = StreamingFileSink.forRowFormat(
-						path, new ProjectionEncoder((Encoder<RowData>) writer, computer))
-						.withBucketAssigner(assigner)
-						.withRollingPolicy(rollingPolicy).build();
-			} else {
-				//noinspection unchecked
-				sink = StreamingFileSink.forBulkFormat(
-						path, new ProjectionBulkFactory((BulkWriter.Factory<RowData>) writer, computer))
-						.withBucketAssigner(assigner)
-						.withRollingPolicy(rollingPolicy).build();
+				return Optional.of(FileInputFormatCompactReader.factory((FileInputFormat<RowData>) format));
+			}
+		} else if (deserializationFormat != null) {
+			// NOTE, we need pass full format types to deserializationFormat
+			DeserializationSchema<RowData> decoder = deserializationFormat.createRuntimeDecoder(
+					createSourceContext(context), getFormatDataType());
+			int[] projectedFields = IntStream.range(0, schema.getFieldCount()).toArray();
+			DeserializationSchemaAdapter format = new DeserializationSchemaAdapter(
+					decoder, schema, projectedFields, partitionKeys, defaultPartName);
+			return Optional.of(CompactBulkReader.factory(format));
+		}
+		return Optional.empty();
+	}
+
+	private DynamicTableSource.Context createSourceContext(Context context) {
+		return new DynamicTableSource.Context() {
+			@Override
+			public <T> TypeInformation<T> createTypeInformation(DataType producedDataType) {
+				return context.createTypeInformation(producedDataType);
 			}
 
-			return dataStream.addSink(sink).setParallelism(dataStream.getParallelism());
-		}
+			@Override
+			public DynamicTableSource.DataStructureConverter createDataStructureConverter(
+					DataType producedDataType) {
+				throw new TableException("Compaction reader not support DataStructure converter.");
+			}
+		};
+	}
+
+	private FileSystemFormatFactory.ReaderContext createReaderContext() {
+		return new FileSystemFormatFactory.ReaderContext() {
+			@Override
+			public TableSchema getSchema() {
+				return schema;
+			}
+
+			@Override
+			public ReadableConfig getFormatOptions() {
+				return formatOptions(formatFactory.factoryIdentifier());
+			}
+
+			@Override
+			public List<String> getPartitionKeys() {
+				return partitionKeys;
+			}
+
+			@Override
+			public String getDefaultPartName() {
+				return defaultPartName;
+			}
+
+			@Override
+			public Path[] getPaths() {
+				return new Path[]{path};
+			}
+
+			@Override
+			public int[] getProjectFields() {
+				return IntStream.range(0, schema.getFieldCount()).toArray();
+			}
+
+			@Override
+			public long getPushedDownLimit() {
+				return Long.MAX_VALUE;
+			}
+
+			@Override
+			public List<ResolvedExpression> getPushedDownFilters() {
+				return Collections.emptyList();
+			}
+		};
 	}
 
 	private Path toStagingPath() {
@@ -174,43 +345,21 @@ public class FileSystemTableSink implements
 	}
 
 	@SuppressWarnings("unchecked")
-	private OutputFormatFactory<RowData> createOutputFormatFactory() {
-		Object writer = createWriter();
+	private OutputFormatFactory<RowData> createOutputFormatFactory(Context sinkContext) {
+		Object writer = createWriter(sinkContext);
 		return writer instanceof Encoder ?
 				path -> createEncoderOutputFormat((Encoder<RowData>) writer, path) :
 				path -> createBulkWriterOutputFormat((BulkWriter.Factory<RowData>) writer, path);
 	}
 
-	private Object createWriter() {
-		FileSystemFormatFactory formatFactory = createFormatFactory(formatProperties);
-		FileSystemFormatFactory.WriterContext context = new FileSystemFormatFactory.WriterContext() {
-
-			@Override
-			public TableSchema getSchema() {
-				return schema;
-			}
-
-			@Override
-			public Map<String, String> getFormatProperties() {
-				return formatProperties;
-			}
-
-			@Override
-			public List<String> getPartitionKeys() {
-				return partitionKeys;
-			}
-		};
-
-		Optional<Encoder<RowData>> encoder = formatFactory.createEncoder(context);
-		Optional<BulkWriter.Factory<RowData>> bulk = formatFactory.createBulkWriterFactory(context);
-
-		if (encoder.isPresent()) {
-			return encoder.get();
-		} else if (bulk.isPresent()) {
-			return bulk.get();
+	private Object createWriter(Context sinkContext) {
+		if (bulkWriterFormat != null) {
+			return bulkWriterFormat.createRuntimeEncoder(sinkContext, getFormatDataType());
+		} else if (serializationFormat != null) {
+			return new SerializationSchemaAdapter(
+					serializationFormat.createRuntimeEncoder(sinkContext, getFormatDataType()));
 		} else {
-			throw new TableException(
-					formatFactory + " format should implement at least one Encoder or BulkWriter");
+			throw new TableException("Can not find format factory.");
 		}
 	}
 
@@ -278,44 +427,6 @@ public class FileSystemTableSink implements
 		};
 	}
 
-	private static TableMetaStoreFactory createTableMetaStoreFactory(Path path) {
-		return (TableMetaStoreFactory) () -> new TableMetaStoreFactory.TableMetaStore() {
-
-			@Override
-			public Path getLocationPath() {
-				return path;
-			}
-
-			@Override
-			public Optional<Path> getPartition(LinkedHashMap<String, String> partitionSpec) {
-				return Optional.empty();
-			}
-
-			@Override
-			public void createOrAlterPartition(LinkedHashMap<String, String> partitionSpec, Path partitionPath) throws Exception {
-			}
-
-			@Override
-			public void close() {
-			}
-		};
-	}
-
-	@Override
-	public FileSystemTableSink configure(String[] fieldNames, TypeInformation<?>[] fieldTypes) {
-		return this;
-	}
-
-	@Override
-	public void setOverwrite(boolean overwrite) {
-		this.overwrite = overwrite;
-	}
-
-	@Override
-	public void setStaticPartition(Map<String, String> partitions) {
-		this.staticPartitions = toPartialLinkedPartSpec(partitions);
-	}
-
 	private LinkedHashMap<String, String> toPartialLinkedPartSpec(Map<String, String> part) {
 		LinkedHashMap<String, String> partSpec = new LinkedHashMap<>();
 		for (String partitionKey : partitionKeys) {
@@ -327,29 +438,55 @@ public class FileSystemTableSink implements
 	}
 
 	@Override
-	public TableSchema getTableSchema() {
-		return schema;
-	}
-
-	@Override
-	public DataType getConsumedDataType() {
-		return schema.toRowDataType().bridgedTo(RowData.class);
-	}
-
-	@Override
-	public boolean configurePartitionGrouping(boolean supportsGrouping) {
+	public boolean requiresPartitionGrouping(boolean supportsGrouping) {
 		this.dynamicGrouping = supportsGrouping;
 		return dynamicGrouping;
+	}
+
+	@Override
+	public ChangelogMode getChangelogMode(ChangelogMode requestedMode) {
+		if (bulkWriterFormat != null) {
+			return bulkWriterFormat.getChangelogMode();
+		} else if (serializationFormat != null) {
+			return serializationFormat.getChangelogMode();
+		} else {
+			throw new TableException("Can not find format factory.");
+		}
+	}
+
+	@Override
+	public DynamicTableSink copy() {
+		FileSystemTableSink sink = new FileSystemTableSink(
+				context, bulkReaderFormat, deserializationFormat, formatFactory, bulkWriterFormat, serializationFormat);
+		sink.overwrite = overwrite;
+		sink.dynamicGrouping = dynamicGrouping;
+		sink.staticPartitions = staticPartitions;
+		return sink;
+	}
+
+	@Override
+	public String asSummaryString() {
+		return "Filesystem";
+	}
+
+	@Override
+	public void applyOverwrite(boolean overwrite) {
+		this.overwrite = overwrite;
+	}
+
+	@Override
+	public void applyStaticPartition(Map<String, String> partition) {
+		this.staticPartitions = toPartialLinkedPartSpec(partition);
 	}
 
 	/**
 	 * Table bucket assigner, wrap {@link PartitionComputer}.
 	 */
-	private static class TableBucketAssigner implements BucketAssigner<RowData, String> {
+	public static class TableBucketAssigner implements BucketAssigner<RowData, String> {
 
 		private final PartitionComputer<RowData> computer;
 
-		private TableBucketAssigner(PartitionComputer<RowData> computer) {
+		public TableBucketAssigner(PartitionComputer<RowData> computer) {
 			this.computer = computer;
 		}
 
@@ -372,13 +509,13 @@ public class FileSystemTableSink implements
 	/**
 	 * Table {@link RollingPolicy}, it extends {@link CheckpointRollingPolicy} for bulk writers.
 	 */
-	private static class TableRollingPolicy extends CheckpointRollingPolicy<RowData, String> {
+	public static class TableRollingPolicy extends CheckpointRollingPolicy<RowData, String> {
 
 		private final boolean rollOnCheckpoint;
 		private final long rollingFileSize;
 		private final long rollingTimeInterval;
 
-		private TableRollingPolicy(
+		public TableRollingPolicy(
 				boolean rollOnCheckpoint,
 				long rollingFileSize,
 				long rollingTimeInterval) {
@@ -429,12 +566,15 @@ public class FileSystemTableSink implements
 		}
 	}
 
-	private static class ProjectionBulkFactory implements BulkWriter.Factory<RowData> {
+	/**
+	 * Project row to non-partition fields.
+	 */
+	public static class ProjectionBulkFactory implements BulkWriter.Factory<RowData> {
 
 		private final BulkWriter.Factory<RowData> factory;
 		private final RowDataPartitionComputer computer;
 
-		private ProjectionBulkFactory(BulkWriter.Factory<RowData> factory, RowDataPartitionComputer computer) {
+		public ProjectionBulkFactory(BulkWriter.Factory<RowData> factory, RowDataPartitionComputer computer) {
 			this.factory = factory;
 			this.computer = computer;
 		}

@@ -19,9 +19,10 @@
 package org.apache.flink.kubernetes;
 
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
+import org.apache.flink.kubernetes.kubeclient.decorators.ExternalServiceDecorator;
 import org.apache.flink.kubernetes.utils.Constants;
-import org.apache.flink.kubernetes.utils.KubernetesUtils;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.LoadBalancerIngress;
 import io.fabric8.kubernetes.api.model.LoadBalancerStatus;
 import io.fabric8.kubernetes.api.model.Service;
@@ -30,7 +31,6 @@ import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.api.model.ServiceStatus;
 import io.fabric8.kubernetes.api.model.ServiceStatusBuilder;
-import org.junit.Before;
 
 import javax.annotation.Nullable;
 
@@ -45,11 +45,6 @@ public class KubernetesClientTestBase extends KubernetesTestBase {
 	protected static final int REST_PORT = 9021;
 	protected static final int NODE_PORT = 31234;
 
-	@Before
-	public void setup() throws Exception {
-		super.setup();
-	}
-
 	protected void mockExpectedServiceFromServerSide(Service expectedService) {
 		final String serviceName = expectedService.getMetadata().getName();
 		final String path = String.format("/api/v1/namespaces/%s/services/%s", NAMESPACE, serviceName);
@@ -57,6 +52,25 @@ public class KubernetesClientTestBase extends KubernetesTestBase {
 			.get()
 			.withPath(path)
 			.andReturn(200, expectedService)
+			.always();
+	}
+
+	protected void mockCreateConfigMapAlreadyExisting(ConfigMap configMap) {
+		final String path = String.format("/api/v1/namespaces/%s/configmaps", NAMESPACE);
+		server.expect()
+			.post()
+			.withPath(path)
+			.andReturn(500, configMap)
+			.always();
+	}
+
+	protected void mockReplaceConfigMapFailed(ConfigMap configMap) {
+		final String name = configMap.getMetadata().getName();
+		final String path = String.format("/api/v1/namespaces/%s/configmaps/%s", NAMESPACE, name);
+		server.expect()
+			.put()
+			.withPath(path)
+			.andReturn(500, configMap)
 			.always();
 	}
 
@@ -113,7 +127,7 @@ public class KubernetesClientTestBase extends KubernetesTestBase {
 			@Nullable ServiceStatus serviceStatus) {
 		final ServiceBuilder serviceBuilder = new ServiceBuilder()
 			.editOrNewMetadata()
-				.withName(KubernetesUtils.getRestServiceName(CLUSTER_ID))
+				.withName(ExternalServiceDecorator.getExternalServiceName(CLUSTER_ID))
 				.endMetadata()
 			.editOrNewSpec()
 				.withType(serviceExposedType.name())

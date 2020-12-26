@@ -18,6 +18,7 @@
 
 package org.apache.flink.streaming.api.operators;
 
+import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
@@ -29,6 +30,7 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.execution.Environment;
@@ -59,6 +61,8 @@ import org.slf4j.LoggerFactory;
 import java.io.Serializable;
 import java.util.Locale;
 import java.util.Optional;
+
+import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * Base class for all stream operators. Operators that contain a user function should extend the class
@@ -156,10 +160,7 @@ public abstract class AbstractStreamOperator<OUT>
 		this.config = config;
 		try {
 			OperatorMetricGroup operatorMetricGroup = environment.getMetricGroup().getOrAddOperator(config.getOperatorID(), config.getOperatorName());
-			this.output = new CountingOutput(output, operatorMetricGroup.getIOMetricGroup().getNumRecordsOutCounter());
-			if (config.isChainStart()) {
-				operatorMetricGroup.getIOMetricGroup().reuseInputMetricsForTask();
-			}
+			this.output = new CountingOutput<>(output, operatorMetricGroup.getIOMetricGroup().getNumRecordsOutCounter());
 			if (config.isChainEnd()) {
 				operatorMetricGroup.getIOMetricGroup().reuseOutputMetricsForTask();
 			}
@@ -212,7 +213,8 @@ public abstract class AbstractStreamOperator<OUT>
 			getMetricGroup(),
 			getOperatorID(),
 			getProcessingTimeService(),
-			null);
+			null,
+			environment.getExternalResourceInfoProvider());
 
 		stateKeySelector1 = config.getStatePartitioner(0, getUserCodeClassloader());
 		stateKeySelector2 = config.getStatePartitioner(1, getUserCodeClassloader());
@@ -250,12 +252,40 @@ public abstract class AbstractStreamOperator<OUT>
 				this,
 				keySerializer,
 				streamTaskCloseableRegistry,
-				metrics);
+				metrics,
+				config.getManagedMemoryFractionOperatorUseCaseOfSlot(
+					ManagedMemoryUseCase.STATE_BACKEND,
+					runtimeContext.getTaskManagerRuntimeInfo().getConfiguration(),
+					runtimeContext.getUserCodeClassLoader()),
+				isUsingCustomRawKeyedState());
 
 		stateHandler = new StreamOperatorStateHandler(context, getExecutionConfig(), streamTaskCloseableRegistry);
 		timeServiceManager = context.internalTimerServiceManager();
 		stateHandler.initializeOperatorState(this);
 		runtimeContext.setKeyedStateStore(stateHandler.getKeyedStateStore().orElse(null));
+	}
+
+	/**
+	 * Indicates whether or not implementations of this class is writing to the raw keyed state streams
+	 * on snapshots, using {@link #snapshotState(StateSnapshotContext)}. If yes, subclasses should
+	 * override this method to return {@code true}.
+	 *
+	 * <p>Subclasses need to explicitly indicate the use of raw keyed state because, internally,
+	 * the {@link AbstractStreamOperator} may attempt to read from it as well to restore heap-based timers and
+	 * ultimately fail with read errors. By setting this flag to {@code true}, this allows the
+	 * {@link AbstractStreamOperator} to know that the data written in the raw keyed states were
+	 * not written by the timer services, and skips the timer restore attempt.
+	 *
+	 * <p>Please refer to FLINK-19741 for further details.
+	 *
+	 * <p>TODO: this method can be removed once all timers are moved to be managed by state backends.
+	 *
+	 * @return flag indicating whether or not this operator is writing to raw keyed
+	 *         state via {@link #snapshotState(StateSnapshotContext)}.
+	 */
+	@Internal
+	protected boolean isUsingCustomRawKeyedState() {
+		return false;
 	}
 
 	/**
@@ -317,7 +347,8 @@ public abstract class AbstractStreamOperator<OUT>
 			checkpointId,
 			timestamp,
 			checkpointOptions,
-			factory);
+			factory,
+			isUsingCustomRawKeyedState());
 	}
 
 	/**
@@ -341,6 +372,11 @@ public abstract class AbstractStreamOperator<OUT>
 	@Override
 	public void notifyCheckpointComplete(long checkpointId) throws Exception {
 		stateHandler.notifyCheckpointComplete(checkpointId);
+	}
+
+	@Override
+	public void notifyCheckpointAborted(long checkpointId) throws Exception {
+		stateHandler.notifyCheckpointAborted(checkpointId);
 	}
 
 	// ------------------------------------------------------------------------
@@ -394,7 +430,6 @@ public abstract class AbstractStreamOperator<OUT>
 		return runtimeContext;
 	}
 
-	@SuppressWarnings("unchecked")
 	@VisibleForTesting
 	public <K> KeyedStateBackend<K> getKeyedStateBackend() {
 		return stateHandler.getKeyedStateBackend();
@@ -462,12 +497,10 @@ public abstract class AbstractStreamOperator<OUT>
 		}
 	}
 
-	@SuppressWarnings({"unchecked", "rawtypes"})
 	public void setCurrentKey(Object key) {
 		stateHandler.setCurrentKey(key);
 	}
 
-	@SuppressWarnings({"unchecked", "rawtypes"})
 	public Object getCurrentKey() {
 		return stateHandler.getCurrentKey();
 	}
@@ -551,12 +584,15 @@ public abstract class AbstractStreamOperator<OUT>
 		if (timeServiceManager == null) {
 			throw new RuntimeException("The timer service has not been initialized.");
 		}
+		@SuppressWarnings("unchecked")
 		InternalTimeServiceManager<K> keyedTimeServiceHandler = (InternalTimeServiceManager<K>) timeServiceManager;
+		KeyedStateBackend<K> keyedStateBackend = getKeyedStateBackend();
+		checkState(keyedStateBackend != null, "Timers can only be used on keyed operators.");
 		return keyedTimeServiceHandler.getInternalTimerService(
 			name,
+			keyedStateBackend.getKeySerializer(),
 			namespaceSerializer,
-			triggerable,
-			stateHandler.getKeyedStateBackend());
+			triggerable);
 	}
 
 	public void processWatermark(Watermark mark) throws Exception {
@@ -587,16 +623,6 @@ public abstract class AbstractStreamOperator<OUT>
 	@Override
 	public OperatorID getOperatorID() {
 		return config.getOperatorID();
-	}
-
-	@VisibleForTesting
-	public int numProcessingTimeTimers() {
-		return timeServiceManager == null ? 0 : timeServiceManager.numProcessingTimeTimers();
-	}
-
-	@VisibleForTesting
-	public int numEventTimeTimers() {
-		return timeServiceManager == null ? 0 : timeServiceManager.numEventTimeTimers();
 	}
 
 	protected Optional<InternalTimeServiceManager<?>> getTimeServiceManager() {

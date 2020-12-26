@@ -19,7 +19,7 @@
 package org.apache.flink.table.planner.expressions
 
 import org.apache.flink.api.java.typeutils.RowTypeInfo
-import org.apache.flink.table.api.scala._
+import org.apache.flink.table.api._
 import org.apache.flink.table.planner.expressions.utils.ExpressionTestBase
 import org.apache.flink.types.Row
 
@@ -54,6 +54,13 @@ class NonDeterministicTests extends ExpressionTestBase {
       currentTimestamp().isGreater("1970-01-01 00:00:00".toTimestamp),
       "currentTimestamp() > '1970-01-01 00:00:00'.toTimestamp",
       "CURRENT_TIMESTAMP > TIMESTAMP '1970-01-01 00:00:00'",
+      "true")
+  }
+
+  @Test
+  def testNow(): Unit = {
+    testSqlApi(
+      "NOW() > TIMESTAMP '1970-01-01 00:00:00'",
       "true")
   }
 

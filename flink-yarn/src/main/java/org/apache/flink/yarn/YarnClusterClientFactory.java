@@ -23,8 +23,10 @@ import org.apache.flink.client.deployment.AbstractContainerizedClusterClientFact
 import org.apache.flink.client.deployment.ClusterClientFactory;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.DeploymentOptionsInternal;
 import org.apache.flink.yarn.configuration.YarnConfigOptions;
 import org.apache.flink.yarn.configuration.YarnDeploymentTarget;
+import org.apache.flink.yarn.configuration.YarnLogConfigUtil;
 
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -32,6 +34,8 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
 import javax.annotation.Nullable;
+
+import java.util.Optional;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -51,6 +55,11 @@ public class YarnClusterClientFactory extends AbstractContainerizedClusterClient
 	@Override
 	public YarnClusterDescriptor createClusterDescriptor(Configuration configuration) {
 		checkNotNull(configuration);
+
+		final String configurationDirectory =
+				configuration.get(DeploymentOptionsInternal.CONF_DIR);
+		YarnLogConfigUtil.setLogConfigFileInConfig(configuration, configurationDirectory);
+
 		return getClusterDescriptor(configuration);
 	}
 
@@ -60,6 +69,11 @@ public class YarnClusterClientFactory extends AbstractContainerizedClusterClient
 		checkNotNull(configuration);
 		final String clusterId = configuration.getString(YarnConfigOptions.APPLICATION_ID);
 		return clusterId != null ? ConverterUtils.toApplicationId(clusterId) : null;
+	}
+
+	@Override
+	public Optional<String> getApplicationTargetName() {
+		return Optional.of(YarnDeploymentTarget.APPLICATION.getName());
 	}
 
 	private YarnClusterDescriptor getClusterDescriptor(Configuration configuration) {

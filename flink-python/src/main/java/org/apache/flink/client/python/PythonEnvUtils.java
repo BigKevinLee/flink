@@ -18,12 +18,17 @@
 
 package org.apache.flink.client.python;
 
+import org.apache.flink.client.deployment.application.UnsuccessfulExecutionException;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.NetUtils;
+import org.apache.flink.util.OperatingSystem;
 import org.apache.flink.util.Preconditions;
+
+import org.apache.flink.shaded.guava18.com.google.common.base.Strings;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +39,10 @@ import py4j.GatewayServer;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -67,13 +75,15 @@ final class PythonEnvUtils {
 
 	static final String PYFLINK_CLIENT_EXECUTABLE = "PYFLINK_CLIENT_EXECUTABLE";
 
+	static volatile Throwable capturedJavaException = null;
+
 	/**
 	 * Wraps Python exec environment.
 	 */
 	static class PythonEnvironment {
 		String tempDirectory;
 
-		String pythonExec = "python";
+		String pythonExec = OperatingSystem.isWindows() ? "python.exe" : "python";
 
 		String pythonPath;
 
@@ -237,19 +247,31 @@ final class PythonEnvUtils {
 	 * @return the process represent the python process.
 	 * @throws IOException Thrown if an error occurred when python process start.
 	 */
-	static Process startPythonProcess(PythonEnvironment pythonEnv, List<String> commands) throws IOException {
+	static Process startPythonProcess(
+		PythonEnvironment pythonEnv,
+		List<String> commands,
+		boolean redirectToPipe) throws IOException {
 		ProcessBuilder pythonProcessBuilder = new ProcessBuilder();
 		Map<String, String> env = pythonProcessBuilder.environment();
 		if (pythonEnv.pythonPath != null) {
-			env.put("PYTHONPATH", pythonEnv.pythonPath);
+			String defaultPythonPath = env.get("PYTHONPATH");
+			if (Strings.isNullOrEmpty(defaultPythonPath)) {
+				env.put("PYTHONPATH", pythonEnv.pythonPath);
+			} else {
+				env.put("PYTHONPATH", String.join(File.pathSeparator, pythonEnv.pythonPath, defaultPythonPath));
+			}
 		}
 		pythonEnv.systemEnv.forEach(env::put);
 		commands.add(0, pythonEnv.pythonExec);
 		pythonProcessBuilder.command(commands);
 		// redirect the stderr to stdout
 		pythonProcessBuilder.redirectErrorStream(true);
-		// set the child process the output same as the parent process.
-		pythonProcessBuilder.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+		if (redirectToPipe) {
+			pythonProcessBuilder.redirectOutput(ProcessBuilder.Redirect.PIPE);
+		} else {
+			// set the child process the output same as the parent process.
+			pythonProcessBuilder.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+		}
 		Process process = pythonProcessBuilder.start();
 		if (!process.isAlive()) {
 			throw new RuntimeException("Failed to start Python process. ");
@@ -276,16 +298,7 @@ final class PythonEnvUtils {
 					.gateway(new Gateway(new ConcurrentHashMap<String, Object>(), new CallbackClient(freePort)))
 					.javaPort(0)
 					.build();
-				CallbackClient callbackClient = (CallbackClient) server.getCallbackClient();
-				// The Java API of py4j does not provide approach to set "daemonize_connections" parameter.
-				// Use reflect to daemonize the connection thread.
-				Field executor = CallbackClient.class.getDeclaredField("executor");
-				executor.setAccessible(true);
-				((ScheduledExecutorService) executor.get(callbackClient)).shutdown();
-				executor.set(callbackClient, Executors.newScheduledThreadPool(1, Thread::new));
-				Method setupCleaner = CallbackClient.class.getDeclaredMethod("setupCleaner");
-				setupCleaner.setAccessible(true);
-				setupCleaner.invoke(callbackClient);
+				resetCallbackClientExecutorService(server);
 				gatewayServerFuture.complete(server);
 				server.start(true);
 			} catch (Throwable e) {
@@ -297,6 +310,43 @@ final class PythonEnvUtils {
 		thread.start();
 		thread.join();
 		return gatewayServerFuture.get();
+	}
+
+	/**
+	 * Reset a daemon thread to the callback client thread pool so that the callback server can be terminated when gate
+	 * way server is shutting down. We need to shut down the none-daemon thread firstly, then set a new thread created
+	 * in a daemon thread to the ExecutorService.
+	 *
+	 * @param gatewayServer the gateway which creates the callback server.
+	 * */
+	private static void resetCallbackClientExecutorService(GatewayServer gatewayServer) throws NoSuchFieldException,
+		IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+		CallbackClient callbackClient = (CallbackClient) gatewayServer.getCallbackClient();
+		// The Java API of py4j does not provide approach to set "daemonize_connections" parameter.
+		// Use reflect to daemonize the connection thread.
+		Field executor = CallbackClient.class.getDeclaredField("executor");
+		executor.setAccessible(true);
+		((ScheduledExecutorService) executor.get(callbackClient)).shutdown();
+		executor.set(callbackClient, Executors.newScheduledThreadPool(1, Thread::new));
+		Method setupCleaner = CallbackClient.class.getDeclaredMethod("setupCleaner");
+		setupCleaner.setAccessible(true);
+		setupCleaner.invoke(callbackClient);
+	}
+
+	/**
+	 * Reset the callback client of gatewayServer with the given callbackListeningAddress and callbackListeningPort
+	 * after the callback server started.
+	 *
+	 * @param callbackServerListeningAddress the listening address of the callback server.
+	 * @param callbackServerListeningPort the listening port of the callback server.
+	 * */
+	public static void resetCallbackClient(String callbackServerListeningAddress, int callbackServerListeningPort) throws
+		UnknownHostException, InvocationTargetException, NoSuchMethodException, IllegalAccessException,
+		NoSuchFieldException {
+
+		gatewayServer = getGatewayServer();
+		gatewayServer.resetCallbackClient(InetAddress.getByName(callbackServerListeningAddress), callbackServerListeningPort);
+		resetCallbackClientExecutorService(gatewayServer);
 	}
 
 	/**
@@ -312,7 +362,7 @@ final class PythonEnvUtils {
 
 	static void setGatewayServer(GatewayServer gatewayServer) {
 		Preconditions.checkArgument(gatewayServer == null || PythonEnvUtils.gatewayServer == null);
-		PythonEnvUtils.gatewayServer = null;
+		PythonEnvUtils.gatewayServer = gatewayServer;
 	}
 
 	static Process launchPy4jPythonClient(
@@ -320,14 +370,19 @@ final class PythonEnvUtils {
 		ReadableConfig config,
 		List<String> commands,
 		String entryPointScript,
-		String tmpDir) throws IOException {
+		String tmpDir,
+		boolean redirectToPipe) throws IOException {
 		PythonEnvironment pythonEnv = PythonEnvUtils.preparePythonEnvironment(
 			config, entryPointScript, tmpDir);
 		// set env variable PYFLINK_GATEWAY_PORT for connecting of python gateway in python process.
 		pythonEnv.systemEnv.put("PYFLINK_GATEWAY_PORT", String.valueOf(gatewayServer.getListeningPort()));
-		// set env variable PYFLINK_CALLBACK_PORT for creating callback server in python process.
-		pythonEnv.systemEnv.put("PYFLINK_CALLBACK_PORT", String.valueOf(gatewayServer.getCallbackClient().getPort()));
 		// start the python process.
-		return PythonEnvUtils.startPythonProcess(pythonEnv, commands);
+		return PythonEnvUtils.startPythonProcess(pythonEnv, commands, redirectToPipe);
+	}
+
+	public static void setPythonException(Throwable pythonException) {
+		if (ExceptionUtils.findThrowable(pythonException, UnsuccessfulExecutionException.class).isPresent()) {
+			capturedJavaException = pythonException;
+		}
 	}
 }

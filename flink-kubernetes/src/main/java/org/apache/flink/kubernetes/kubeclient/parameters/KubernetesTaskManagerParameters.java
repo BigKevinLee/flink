@@ -46,15 +46,19 @@ public class KubernetesTaskManagerParameters extends AbstractKubernetesParameter
 
 	private final ContaineredTaskManagerParameters containeredTaskManagerParameters;
 
+	private final Map<String, Long> taskManagerExternalResources;
+
 	public KubernetesTaskManagerParameters(
 			Configuration flinkConfig,
 			String podName,
 			String dynamicProperties,
-			ContaineredTaskManagerParameters containeredTaskManagerParameters) {
+			ContaineredTaskManagerParameters containeredTaskManagerParameters,
+			Map<String, Long> taskManagerExternalResources) {
 		super(flinkConfig);
 		this.podName = checkNotNull(podName);
 		this.dynamicProperties = checkNotNull(dynamicProperties);
 		this.containeredTaskManagerParameters = checkNotNull(containeredTaskManagerParameters);
+		this.taskManagerExternalResources = checkNotNull(taskManagerExternalResources);
 	}
 
 	@Override
@@ -100,6 +104,16 @@ public class KubernetesTaskManagerParameters extends AbstractKubernetesParameter
 
 	public double getTaskManagerCPU() {
 		return containeredTaskManagerParameters.getTaskExecutorProcessSpec().getCpuCores().getValue().doubleValue();
+	}
+
+	public String getServiceAccount() {
+		return flinkConfig.getOptional(KubernetesConfigOptions.TASK_MANAGER_SERVICE_ACCOUNT)
+			.orElse(flinkConfig.getString(KubernetesConfigOptions.KUBERNETES_SERVICE_ACCOUNT));
+
+	}
+
+	public Map<String, Long> getTaskManagerExternalResources() {
+		return taskManagerExternalResources;
 	}
 
 	public int getRPCPort() {

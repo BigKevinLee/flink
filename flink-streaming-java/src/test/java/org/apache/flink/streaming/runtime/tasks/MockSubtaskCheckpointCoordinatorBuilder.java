@@ -25,7 +25,7 @@ import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.state.CheckpointStorageWorkerView;
-import org.apache.flink.runtime.state.memory.MemoryBackendCheckpointStorage;
+import org.apache.flink.runtime.state.memory.MemoryBackendCheckpointStorageAccess;
 import org.apache.flink.util.function.BiFunctionWithException;
 
 import java.io.IOException;
@@ -46,9 +46,31 @@ public class MockSubtaskCheckpointCoordinatorBuilder {
 	private CloseableRegistry closeableRegistry = new CloseableRegistry();
 	private ExecutorService executorService = Executors.newDirectExecutorService();
 	private BiFunctionWithException<ChannelStateWriter, Long, CompletableFuture<Void>, IOException> prepareInputSnapshot = (channelStateWriter, aLong) -> FutureUtils.completedVoidFuture();
+	private boolean unalignedCheckpointEnabled;
+	private int maxRecordAbortedCheckpoints = 10;
 
 	public MockSubtaskCheckpointCoordinatorBuilder setEnvironment(Environment environment) {
 		this.environment = environment;
+		return this;
+	}
+
+	public MockSubtaskCheckpointCoordinatorBuilder setPrepareInputSnapshot(BiFunctionWithException<ChannelStateWriter, Long, CompletableFuture<Void>, IOException> prepareInputSnapshot) {
+		this.prepareInputSnapshot = prepareInputSnapshot;
+		return this;
+	}
+
+	public MockSubtaskCheckpointCoordinatorBuilder setExecutor(ExecutorService executor) {
+		this.executorService = executor;
+		return this;
+	}
+
+	public MockSubtaskCheckpointCoordinatorBuilder setMaxRecordAbortedCheckpoints(int maxRecordAbortedCheckpoints) {
+		this.maxRecordAbortedCheckpoints = maxRecordAbortedCheckpoints;
+		return this;
+	}
+
+	public MockSubtaskCheckpointCoordinatorBuilder setUnalignedCheckpointEnabled(boolean unalignedCheckpointEnabled) {
+		this.unalignedCheckpointEnabled = unalignedCheckpointEnabled;
 		return this;
 	}
 
@@ -57,7 +79,7 @@ public class MockSubtaskCheckpointCoordinatorBuilder {
 			this.environment = MockEnvironment.builder().build();
 		}
 		if (checkpointStorage == null) {
-			this.checkpointStorage = new MemoryBackendCheckpointStorage(environment.getJobID(), null, null, 1024);
+			this.checkpointStorage = new MemoryBackendCheckpointStorageAccess(environment.getJobID(), null, null, 1024);
 		}
 		if (asyncExceptionHandler == null) {
 			this.asyncExceptionHandler = new NonHandleAsyncException();
@@ -71,8 +93,9 @@ public class MockSubtaskCheckpointCoordinatorBuilder {
 			executorService,
 			environment,
 			asyncExceptionHandler,
-			false,
-			prepareInputSnapshot);
+			unalignedCheckpointEnabled,
+			prepareInputSnapshot,
+			maxRecordAbortedCheckpoints);
 	}
 
 	private static class NonHandleAsyncException implements AsyncExceptionHandler {

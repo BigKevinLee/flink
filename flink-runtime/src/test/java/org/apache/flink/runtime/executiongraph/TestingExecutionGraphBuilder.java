@@ -29,10 +29,6 @@ import org.apache.flink.runtime.blob.VoidBlobWriter;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
 import org.apache.flink.runtime.client.JobExecutionException;
-import org.apache.flink.runtime.executiongraph.failover.FailoverStrategy;
-import org.apache.flink.runtime.executiongraph.failover.RestartAllStrategy;
-import org.apache.flink.runtime.executiongraph.restart.NoRestartStrategy;
-import org.apache.flink.runtime.executiongraph.restart.RestartStrategy;
 import org.apache.flink.runtime.io.network.partition.JobMasterPartitionTracker;
 import org.apache.flink.runtime.io.network.partition.NoOpJobMasterPartitionTracker;
 import org.apache.flink.runtime.jobgraph.JobGraph;
@@ -63,8 +59,6 @@ public class TestingExecutionGraphBuilder {
 	private ScheduledExecutorService futureExecutor = TestingUtils.defaultExecutor();
 	private Executor ioExecutor = TestingUtils.defaultExecutor();
 	private Time rpcTimeout = AkkaUtils.getDefaultTimeout();
-	private RestartStrategy restartStrategy = new NoRestartStrategy();
-	private FailoverStrategy.Factory failoverStrategyFactory = new RestartAllStrategy.Factory();
 	private SlotProvider slotProvider = new TestingSlotProvider(slotRequestId -> CompletableFuture.completedFuture(new TestingLogicalSlotBuilder().createTestingLogicalSlot()));
 	private ClassLoader userClassLoader = ExecutionGraph.class.getClassLoader();
 	private BlobWriter blobWriter = VoidBlobWriter.getInstance();
@@ -75,6 +69,8 @@ public class TestingExecutionGraphBuilder {
 	private JobGraph jobGraph = new JobGraph();
 	private MetricGroup metricGroup = new UnregisteredMetricsGroup();
 	private CheckpointRecoveryFactory checkpointRecoveryFactory = new StandaloneCheckpointRecoveryFactory();
+	private ExecutionDeploymentListener executionDeploymentListener = NoOpExecutionDeploymentListener.get();
+	private ExecutionStateUpdateListener executionStateUpdateListener = (execution, newState) -> {};
 
 	private TestingExecutionGraphBuilder() {
 
@@ -102,16 +98,6 @@ public class TestingExecutionGraphBuilder {
 
 	public TestingExecutionGraphBuilder setRpcTimeout(Time rpcTimeout) {
 		this.rpcTimeout = rpcTimeout;
-		return this;
-	}
-
-	public TestingExecutionGraphBuilder setRestartStrategy(RestartStrategy restartStrategy) {
-		this.restartStrategy = restartStrategy;
-		return this;
-	}
-
-	public TestingExecutionGraphBuilder setFailoverStrategyFactory(FailoverStrategy.Factory failoverStrategyFactory) {
-		this.failoverStrategyFactory = failoverStrategyFactory;
 		return this;
 	}
 
@@ -155,6 +141,16 @@ public class TestingExecutionGraphBuilder {
 		return this;
 	}
 
+	public TestingExecutionGraphBuilder setExecutionDeploymentListener(ExecutionDeploymentListener executionDeploymentListener) {
+		this.executionDeploymentListener = executionDeploymentListener;
+		return this;
+	}
+
+	public TestingExecutionGraphBuilder setExecutionStateUpdateListener(ExecutionStateUpdateListener executionStateUpdateListener) {
+		this.executionStateUpdateListener = executionStateUpdateListener;
+		return this;
+	}
+
 	public ExecutionGraph build() throws JobException, JobExecutionException {
 		return ExecutionGraphBuilder.buildGraph(
 			null,
@@ -166,14 +162,15 @@ public class TestingExecutionGraphBuilder {
 			userClassLoader,
 			checkpointRecoveryFactory,
 			rpcTimeout,
-			restartStrategy,
 			metricGroup,
 			blobWriter,
 			allocationTimeout,
 			LOG,
 			shuffleMaster,
 			partitionTracker,
-			failoverStrategyFactory);
+			executionDeploymentListener,
+			executionStateUpdateListener,
+			System.currentTimeMillis());
 	}
 
 }

@@ -33,17 +33,22 @@ import org.apache.flink.runtime.io.network.partition.ResultPartition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
+import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 import org.apache.flink.runtime.rest.handler.legacy.backpressure.OperatorBackPressureStatsResponse;
 import org.apache.flink.runtime.rpc.FencedRpcGateway;
 import org.apache.flink.runtime.rpc.RpcTimeout;
-import org.apache.flink.runtime.taskexecutor.AccumulatorReport;
+import org.apache.flink.runtime.slots.ResourceRequirement;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorToJobManagerHeartbeatPayload;
 import org.apache.flink.runtime.taskexecutor.slot.SlotOffer;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.runtime.taskmanager.UnresolvedTaskManagerLocation;
+import org.apache.flink.util.SerializedValue;
 
 import javax.annotation.Nullable;
 
@@ -113,9 +118,9 @@ public interface JobMasterGateway extends
 	 *
 	 * @param partitionID     The partition which has already produced data
 	 * @param timeout         before the rpc call fails
-	 * @return Future acknowledge of the schedule or update operation
+	 * @return Future acknowledge of the notification
 	 */
-	CompletableFuture<Acknowledge> scheduleOrUpdateConsumers(
+	CompletableFuture<Acknowledge> notifyPartitionDataAvailable(
 			final ResultPartitionID partitionID,
 			@RpcTimeout final Time timeout);
 
@@ -180,11 +185,11 @@ public interface JobMasterGateway extends
 	 * Sends the heartbeat to job manager from task manager.
 	 *
 	 * @param resourceID unique id of the task manager
-	 * @param accumulatorReport report containing accumulator updates
+	 * @param payload report payload
 	 */
 	void heartbeatFromTaskManager(
 		final ResourceID resourceID,
-		final AccumulatorReport accumulatorReport);
+		final TaskExecutorToJobManagerHeartbeatPayload payload);
 
 	/**
 	 * Sends heartbeat request from the resource manager.
@@ -262,6 +267,13 @@ public interface JobMasterGateway extends
 	void notifyAllocationFailure(AllocationID allocationID, Exception cause);
 
 	/**
+	 * Notifies that not enough resources are available to fulfill the resource requirements of a job.
+	 *
+	 * @param acquiredResources the resources that have been acquired for the job
+	 */
+	void notifyNotEnoughResourcesAvailable(Collection<ResourceRequirement> acquiredResources);
+
+	/**
 	 * Update the aggregate and return the new value.
 	 *
 	 * @param aggregateName The name of the aggregate to update
@@ -271,4 +283,19 @@ public interface JobMasterGateway extends
 	 * @return The updated aggregate
 	 */
 	CompletableFuture<Object> updateGlobalAggregate(String aggregateName, Object aggregand, byte[] serializedAggregationFunction);
+
+	/**
+	 * Deliver a coordination request to a specified coordinator and return the response.
+	 *
+	 * @param operatorId identifying the coordinator to receive the request
+	 * @param serializedRequest serialized request to deliver
+	 * @return A future containing the response.
+	 *         The response will fail with a {@link org.apache.flink.util.FlinkException}
+	 *         if the task is not running, or no operator/coordinator exists for the given ID,
+	 *         or the coordinator cannot handle client events.
+	 */
+	CompletableFuture<CoordinationResponse> deliverCoordinationRequestToCoordinator(
+		OperatorID operatorId,
+		SerializedValue<CoordinationRequest> serializedRequest,
+		@RpcTimeout Time timeout);
 }

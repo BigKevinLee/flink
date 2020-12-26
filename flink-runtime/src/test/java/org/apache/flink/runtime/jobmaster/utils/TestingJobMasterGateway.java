@@ -42,13 +42,16 @@ import org.apache.flink.runtime.jobmaster.SerializedInputSplit;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.checkpoint.DeclineCheckpoint;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
+import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 import org.apache.flink.runtime.rest.handler.legacy.backpressure.OperatorBackPressureStatsResponse;
+import org.apache.flink.runtime.slots.ResourceRequirement;
 import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.taskexecutor.AccumulatorReport;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorToJobManagerHeartbeatPayload;
 import org.apache.flink.runtime.taskexecutor.slot.SlotOffer;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.runtime.taskmanager.UnresolvedTaskManagerLocation;
@@ -92,7 +95,7 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	private final BiFunction<IntermediateDataSetID, ResultPartitionID, CompletableFuture<ExecutionState>> requestPartitionStateFunction;
 
 	@Nonnull
-	private final Function<ResultPartitionID, CompletableFuture<Acknowledge>> scheduleOrUpdateConsumersFunction;
+	private final Function<ResultPartitionID, CompletableFuture<Acknowledge>> notifyPartitionDataAvailableFunction;
 
 	@Nonnull
 	private final Function<ResourceID, CompletableFuture<Acknowledge>> disconnectTaskManagerFunction;
@@ -110,7 +113,7 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	private final BiFunction<String, UnresolvedTaskManagerLocation, CompletableFuture<RegistrationResponse>> registerTaskManagerFunction;
 
 	@Nonnull
-	private final BiConsumer<ResourceID, AccumulatorReport> taskManagerHeartbeatConsumer;
+	private final BiConsumer<ResourceID, TaskExecutorToJobManagerHeartbeatPayload> taskManagerHeartbeatConsumer;
 
 	@Nonnull
 	private final Consumer<ResourceID> resourceManagerHeartbeatConsumer;
@@ -157,6 +160,11 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	@Nonnull
 	private final TriFunction<ExecutionAttemptID, OperatorID, SerializedValue<OperatorEvent>, CompletableFuture<Acknowledge>> operatorEventSender;
 
+	@Nonnull
+	private final BiFunction<OperatorID, SerializedValue<CoordinationRequest>, CompletableFuture<CoordinationResponse>> deliverCoordinationRequestFunction;
+
+	private final Consumer<Collection<ResourceRequirement>> notifyNotEnoughResourcesConsumer;
+
 	public TestingJobMasterGateway(
 			@Nonnull String address,
 			@Nonnull String hostname,
@@ -164,13 +172,13 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 			@Nonnull Function<TaskExecutionState, CompletableFuture<Acknowledge>> updateTaskExecutionStateFunction,
 			@Nonnull BiFunction<JobVertexID, ExecutionAttemptID, CompletableFuture<SerializedInputSplit>> requestNextInputSplitFunction,
 			@Nonnull BiFunction<IntermediateDataSetID, ResultPartitionID, CompletableFuture<ExecutionState>> requestPartitionStateFunction,
-			@Nonnull Function<ResultPartitionID, CompletableFuture<Acknowledge>> scheduleOrUpdateConsumersFunction,
+			@Nonnull Function<ResultPartitionID, CompletableFuture<Acknowledge>> notifyPartitionDataAvailableFunction,
 			@Nonnull Function<ResourceID, CompletableFuture<Acknowledge>> disconnectTaskManagerFunction,
 			@Nonnull Consumer<ResourceManagerId> disconnectResourceManagerConsumer,
 			@Nonnull BiFunction<ResourceID, Collection<SlotOffer>, CompletableFuture<Collection<SlotOffer>>> offerSlotsFunction,
 			@Nonnull TriConsumer<ResourceID, AllocationID, Throwable> failSlotConsumer,
 			@Nonnull BiFunction<String, UnresolvedTaskManagerLocation, CompletableFuture<RegistrationResponse>> registerTaskManagerFunction,
-			@Nonnull BiConsumer<ResourceID, AccumulatorReport> taskManagerHeartbeatConsumer,
+			@Nonnull BiConsumer<ResourceID, TaskExecutorToJobManagerHeartbeatPayload> taskManagerHeartbeatConsumer,
 			@Nonnull Consumer<ResourceID> resourceManagerHeartbeatConsumer,
 			@Nonnull Supplier<CompletableFuture<JobDetails>> requestJobDetailsSupplier,
 			@Nonnull Supplier<CompletableFuture<ArchivedExecutionGraph>> requestJobSupplier,
@@ -185,14 +193,16 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 			@Nonnull Function<Tuple6<JobID, JobVertexID, KeyGroupRange, String, KvStateID, InetSocketAddress>, CompletableFuture<Acknowledge>> notifyKvStateRegisteredFunction,
 			@Nonnull Function<Tuple4<JobID, JobVertexID, KeyGroupRange, String>, CompletableFuture<Acknowledge>> notifyKvStateUnregisteredFunction,
 			@Nonnull TriFunction<String, Object, byte[], CompletableFuture<Object>> updateAggregateFunction,
-			@Nonnull TriFunction<ExecutionAttemptID, OperatorID, SerializedValue<OperatorEvent>, CompletableFuture<Acknowledge>> operatorEventSender) {
+			@Nonnull TriFunction<ExecutionAttemptID, OperatorID, SerializedValue<OperatorEvent>, CompletableFuture<Acknowledge>> operatorEventSender,
+			@Nonnull BiFunction<OperatorID, SerializedValue<CoordinationRequest>, CompletableFuture<CoordinationResponse>> deliverCoordinationRequestFunction,
+			@Nonnull Consumer<Collection<ResourceRequirement>> notifyNotEnoughResourcesConsumer) {
 		this.address = address;
 		this.hostname = hostname;
 		this.cancelFunction = cancelFunction;
 		this.updateTaskExecutionStateFunction = updateTaskExecutionStateFunction;
 		this.requestNextInputSplitFunction = requestNextInputSplitFunction;
 		this.requestPartitionStateFunction = requestPartitionStateFunction;
-		this.scheduleOrUpdateConsumersFunction = scheduleOrUpdateConsumersFunction;
+		this.notifyPartitionDataAvailableFunction = notifyPartitionDataAvailableFunction;
 		this.disconnectTaskManagerFunction = disconnectTaskManagerFunction;
 		this.disconnectResourceManagerConsumer = disconnectResourceManagerConsumer;
 		this.offerSlotsFunction = offerSlotsFunction;
@@ -214,6 +224,8 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 		this.notifyKvStateUnregisteredFunction = notifyKvStateUnregisteredFunction;
 		this.updateAggregateFunction = updateAggregateFunction;
 		this.operatorEventSender = operatorEventSender;
+		this.deliverCoordinationRequestFunction = deliverCoordinationRequestFunction;
+		this.notifyNotEnoughResourcesConsumer = notifyNotEnoughResourcesConsumer;
 	}
 
 	@Override
@@ -237,8 +249,8 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	}
 
 	@Override
-	public CompletableFuture<Acknowledge> scheduleOrUpdateConsumers(ResultPartitionID partitionID, Time timeout) {
-		return scheduleOrUpdateConsumersFunction.apply(partitionID);
+	public CompletableFuture<Acknowledge> notifyPartitionDataAvailable(ResultPartitionID partitionID, Time timeout) {
+		return notifyPartitionDataAvailableFunction.apply(partitionID);
 	}
 
 	@Override
@@ -267,8 +279,8 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	}
 
 	@Override
-	public void heartbeatFromTaskManager(ResourceID resourceID, AccumulatorReport accumulatorReport) {
-		taskManagerHeartbeatConsumer.accept(resourceID, accumulatorReport);
+	public void heartbeatFromTaskManager(ResourceID resourceID, TaskExecutorToJobManagerHeartbeatPayload payload) {
+		taskManagerHeartbeatConsumer.accept(resourceID, payload);
 	}
 
 	@Override
@@ -309,6 +321,11 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	@Override
 	public void notifyAllocationFailure(AllocationID allocationID, Exception cause) {
 		notifyAllocationFailureConsumer.accept(allocationID, cause);
+	}
+
+	@Override
+	public void notifyNotEnoughResourcesAvailable(Collection<ResourceRequirement> acquiredResources) {
+		notifyNotEnoughResourcesConsumer.accept(acquiredResources);
 	}
 
 	@Override
@@ -359,5 +376,10 @@ public class TestingJobMasterGateway implements JobMasterGateway {
 	@Override
 	public CompletableFuture<Acknowledge> sendOperatorEventToCoordinator(ExecutionAttemptID task, OperatorID operatorID, SerializedValue<OperatorEvent> event) {
 		return operatorEventSender.apply(task, operatorID, event);
+	}
+
+	@Override
+	public CompletableFuture<CoordinationResponse> deliverCoordinationRequestToCoordinator(OperatorID operatorId, SerializedValue<CoordinationRequest> serializedRequest, Time timeout) {
+		return deliverCoordinationRequestFunction.apply(operatorId, serializedRequest);
 	}
 }

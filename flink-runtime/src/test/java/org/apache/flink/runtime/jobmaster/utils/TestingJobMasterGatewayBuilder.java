@@ -41,14 +41,17 @@ import org.apache.flink.runtime.jobmaster.SerializedInputSplit;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.checkpoint.DeclineCheckpoint;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
+import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.query.UnknownKvStateLocation;
 import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 import org.apache.flink.runtime.rest.handler.legacy.backpressure.OperatorBackPressureStatsResponse;
+import org.apache.flink.runtime.slots.ResourceRequirement;
 import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.taskexecutor.AccumulatorReport;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorToJobManagerHeartbeatPayload;
 import org.apache.flink.runtime.taskexecutor.slot.SlotOffer;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.runtime.taskmanager.UnresolvedTaskManagerLocation;
@@ -80,13 +83,13 @@ public class TestingJobMasterGatewayBuilder {
 	private Function<TaskExecutionState, CompletableFuture<Acknowledge>> updateTaskExecutionStateFunction = ignored -> CompletableFuture.completedFuture(Acknowledge.get());
 	private BiFunction<JobVertexID, ExecutionAttemptID, CompletableFuture<SerializedInputSplit>> requestNextInputSplitFunction = (ignoredA, ignoredB) -> CompletableFuture.completedFuture(new SerializedInputSplit(null));
 	private BiFunction<IntermediateDataSetID, ResultPartitionID, CompletableFuture<ExecutionState>> requestPartitionStateFunction = (ignoredA, ignoredB) -> CompletableFuture.completedFuture(ExecutionState.RUNNING);
-	private Function<ResultPartitionID, CompletableFuture<Acknowledge>> scheduleOrUpdateConsumersFunction = ignored -> CompletableFuture.completedFuture(Acknowledge.get());
+	private Function<ResultPartitionID, CompletableFuture<Acknowledge>> notifyPartitionDataAvailableFunction = ignored -> CompletableFuture.completedFuture(Acknowledge.get());
 	private Function<ResourceID, CompletableFuture<Acknowledge>> disconnectTaskManagerFunction = ignored -> CompletableFuture.completedFuture(Acknowledge.get());
 	private Consumer<ResourceManagerId> disconnectResourceManagerConsumer = ignored -> {};
 	private BiFunction<ResourceID, Collection<SlotOffer>, CompletableFuture<Collection<SlotOffer>>> offerSlotsFunction = (ignoredA, ignoredB) -> CompletableFuture.completedFuture(Collections.emptyList());
 	private TriConsumer<ResourceID, AllocationID, Throwable> failSlotConsumer = (ignoredA, ignoredB, ignoredC) -> {};
 	private BiFunction<String, UnresolvedTaskManagerLocation, CompletableFuture<RegistrationResponse>> registerTaskManagerFunction = (ignoredA, ignoredB) -> CompletableFuture.completedFuture(new JMTMRegistrationSuccess(RESOURCE_MANAGER_ID));
-	private BiConsumer<ResourceID, AccumulatorReport> taskManagerHeartbeatConsumer = (ignoredA, ignoredB) -> {};
+	private BiConsumer<ResourceID, TaskExecutorToJobManagerHeartbeatPayload> taskManagerHeartbeatConsumer = (ignoredA, ignoredB) -> {};
 	private Consumer<ResourceID> resourceManagerHeartbeatConsumer = ignored -> {};
 	private Supplier<CompletableFuture<JobDetails>> requestJobDetailsSupplier = () -> FutureUtils.completedExceptionally(new UnsupportedOperationException());
 	private Supplier<CompletableFuture<ArchivedExecutionGraph>> requestJobSupplier = () -> FutureUtils.completedExceptionally(new UnsupportedOperationException());
@@ -102,6 +105,8 @@ public class TestingJobMasterGatewayBuilder {
 	private Function<Tuple4<JobID, JobVertexID, KeyGroupRange, String>, CompletableFuture<Acknowledge>> notifyKvStateUnregisteredFunction = ignored -> CompletableFuture.completedFuture(Acknowledge.get());
 	private TriFunction<String, Object, byte[], CompletableFuture<Object>> updateAggregateFunction = (a, b, c) -> CompletableFuture.completedFuture(new Object());
 	private TriFunction<ExecutionAttemptID, OperatorID, SerializedValue<OperatorEvent>, CompletableFuture<Acknowledge>> operatorEventSender = (a, b, c) -> CompletableFuture.completedFuture(Acknowledge.get());
+	private BiFunction<OperatorID, SerializedValue<CoordinationRequest>, CompletableFuture<CoordinationResponse>> deliverCoordinationRequestFunction = (a, b) -> FutureUtils.completedExceptionally(new UnsupportedOperationException());
+	private Consumer<Collection<ResourceRequirement>> notifyNotEnoughResourcesConsumer = ignored -> {};
 
 	public TestingJobMasterGatewayBuilder setAddress(String address) {
 		this.address = address;
@@ -133,8 +138,8 @@ public class TestingJobMasterGatewayBuilder {
 		return this;
 	}
 
-	public TestingJobMasterGatewayBuilder setScheduleOrUpdateConsumersFunction(Function<ResultPartitionID, CompletableFuture<Acknowledge>> scheduleOrUpdateConsumersFunction) {
-		this.scheduleOrUpdateConsumersFunction = scheduleOrUpdateConsumersFunction;
+	public TestingJobMasterGatewayBuilder setNotifyPartitionDataAvailableFunction(Function<ResultPartitionID, CompletableFuture<Acknowledge>> notifyPartitionDataAvailableFunction) {
+		this.notifyPartitionDataAvailableFunction = notifyPartitionDataAvailableFunction;
 		return this;
 	}
 
@@ -163,7 +168,7 @@ public class TestingJobMasterGatewayBuilder {
 		return this;
 	}
 
-	public TestingJobMasterGatewayBuilder setTaskManagerHeartbeatConsumer(BiConsumer<ResourceID, AccumulatorReport> taskManagerHeartbeatConsumer) {
+	public TestingJobMasterGatewayBuilder setTaskManagerHeartbeatConsumer(BiConsumer<ResourceID, TaskExecutorToJobManagerHeartbeatPayload> taskManagerHeartbeatConsumer) {
 		this.taskManagerHeartbeatConsumer = taskManagerHeartbeatConsumer;
 		return this;
 	}
@@ -200,6 +205,11 @@ public class TestingJobMasterGatewayBuilder {
 
 	public TestingJobMasterGatewayBuilder setNotifyAllocationFailureConsumer(BiConsumer<AllocationID, Throwable> notifyAllocationFailureConsumer) {
 		this.notifyAllocationFailureConsumer = notifyAllocationFailureConsumer;
+		return this;
+	}
+
+	public TestingJobMasterGatewayBuilder setNotifyNotEnoughResourcesConsumer(Consumer<Collection<ResourceRequirement>> notifyNotEnoughResourcesConsumer) {
+		this.notifyNotEnoughResourcesConsumer = notifyNotEnoughResourcesConsumer;
 		return this;
 	}
 
@@ -243,6 +253,11 @@ public class TestingJobMasterGatewayBuilder {
 		return this;
 	}
 
+	public TestingJobMasterGatewayBuilder setDeliverCoordinationRequestFunction(BiFunction<OperatorID, SerializedValue<CoordinationRequest>, CompletableFuture<CoordinationResponse>> deliverCoordinationRequestFunction) {
+		this.deliverCoordinationRequestFunction = deliverCoordinationRequestFunction;
+		return this;
+	}
+
 	public TestingJobMasterGateway build() {
 		return new TestingJobMasterGateway(
 			address,
@@ -251,7 +266,7 @@ public class TestingJobMasterGatewayBuilder {
 			updateTaskExecutionStateFunction,
 			requestNextInputSplitFunction,
 			requestPartitionStateFunction,
-			scheduleOrUpdateConsumersFunction,
+			notifyPartitionDataAvailableFunction,
 			disconnectTaskManagerFunction,
 			disconnectResourceManagerConsumer,
 			offerSlotsFunction,
@@ -272,6 +287,8 @@ public class TestingJobMasterGatewayBuilder {
 			notifyKvStateRegisteredFunction,
 			notifyKvStateUnregisteredFunction,
 			updateAggregateFunction,
-			operatorEventSender);
+			operatorEventSender,
+			deliverCoordinationRequestFunction,
+			notifyNotEnoughResourcesConsumer);
 	}
 }

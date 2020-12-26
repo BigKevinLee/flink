@@ -25,13 +25,11 @@ import org.apache.flink.kubernetes.kubeclient.parameters.KubernetesJobManagerPar
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.jobmanager.JobManagerProcessSpec;
 import org.apache.flink.runtime.jobmanager.JobManagerProcessUtils;
-import org.apache.flink.runtime.util.config.memory.ProcessMemorySpec;
-import org.apache.flink.runtime.util.config.memory.ProcessMemoryUtils;
 
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ContainerBuilder;
 
-import java.util.Arrays;
+import java.util.List;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -48,10 +46,10 @@ public class JavaCmdJobManagerDecorator extends AbstractKubernetesStepDecorator 
 
 	@Override
 	public FlinkPod decorateFlinkPod(FlinkPod flinkPod) {
-		final JobManagerProcessSpec processSpec = JobManagerProcessUtils.processSpecFromConfigWithFallbackForLegacyHeap(
+		final JobManagerProcessSpec processSpec = JobManagerProcessUtils.processSpecFromConfigWithNewOptionToInterpretLegacyHeap(
 			kubernetesJobManagerParameters.getFlinkConfiguration(),
 			JobManagerOptions.TOTAL_PROCESS_MEMORY);
-		final String startCommand = getJobManagerStartCommand(
+		final List<String> startCommand = getJobManagerStartCommand(
 			kubernetesJobManagerParameters.getFlinkConfiguration(),
 			processSpec,
 			kubernetesJobManagerParameters.getFlinkConfDirInPod(),
@@ -62,7 +60,7 @@ public class JavaCmdJobManagerDecorator extends AbstractKubernetesStepDecorator 
 
 		final Container mainContainerWithStartCmd = new ContainerBuilder(flinkPod.getMainContainer())
 			.withCommand(kubernetesJobManagerParameters.getContainerEntrypoint())
-			.withArgs(Arrays.asList("/bin/bash", "-c", startCommand))
+			.withArgs(startCommand)
 			.build();
 
 		return new FlinkPod.Builder(flinkPod)
@@ -82,16 +80,17 @@ public class JavaCmdJobManagerDecorator extends AbstractKubernetesStepDecorator 
 	 * @param mainClass The main class to start with.
 	 * @return A String containing the job manager startup command.
 	 */
-	private static String getJobManagerStartCommand(
+	private static List<String> getJobManagerStartCommand(
 			Configuration flinkConfig,
-			ProcessMemorySpec jobManagerProcessSpec,
+			JobManagerProcessSpec jobManagerProcessSpec,
 			String configDirectory,
 			String logDirectory,
 			boolean hasLogback,
 			boolean hasLog4j,
 			String mainClass) {
-		final String jvmMemOpts = ProcessMemoryUtils.generateJvmParametersStr(jobManagerProcessSpec);
-		return KubernetesUtils.getCommonStartCommand(
+		final String jvmMemOpts = JobManagerProcessUtils.generateJvmParametersStr(jobManagerProcessSpec, flinkConfig);
+		final String dynamicParameters = JobManagerProcessUtils.generateDynamicConfigsStr(jobManagerProcessSpec);
+		final String javaCommand = KubernetesUtils.getCommonStartCommand(
 			flinkConfig,
 			KubernetesUtils.ClusterComponent.JOB_MANAGER,
 			jvmMemOpts,
@@ -100,6 +99,7 @@ public class JavaCmdJobManagerDecorator extends AbstractKubernetesStepDecorator 
 			hasLogback,
 			hasLog4j,
 			mainClass,
-			null);
+			dynamicParameters);
+		return KubernetesUtils.getStartCommandWithBashWrapper(javaCommand);
 	}
 }
